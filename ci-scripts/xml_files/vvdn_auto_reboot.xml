@@ -1,0 +1,16 @@
+<!-- SPDX-License-Identifier: LicenseRef-CSSL-1.0 -->
+
+<testCaseList>
+  <htmlTabRef>vvdn-auto-reboot</htmlTabRef>
+  <htmlTabName>VVDN LPRU Auto Reboot</htmlTabName>
+  <htmlTabIcon>wrench</htmlTabIcon>
+
+  <testCase>
+    <class>Custom_Script</class>
+    <always_exec>true</always_exec>
+    <desc>Reboot VVDN RU</desc>
+    <node>cacofonix</node>
+    <script>scripts/vvdn-reboot.sh</script>
+  </testCase>
+
+</testCaseList>
