@@ -92,8 +92,8 @@
 
   <testCase>
     <class>Iperf</class>
-    <desc>iperf (UL/60Mbps/UDP)(30 sec)</desc>
-    <iperf_args>-u -b 60M -t 30</iperf_args>
+    <desc>iperf (UL/120Mbps/UDP)(30 sec)</desc>
+    <iperf_args>-u -b 120M -t 30</iperf_args>
     <id>up2-fhi72</id>
     <iperf_packetloss_threshold>20</iperf_packetloss_threshold>
     <iperf_bitrate_threshold>80</iperf_bitrate_threshold>
