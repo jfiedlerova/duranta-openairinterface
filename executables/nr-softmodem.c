@@ -86,24 +86,10 @@ int sync_var=-1; //!< protected by mutex \ref sync_mutex.
 int config_sync_var=-1;
 int oai_exit = 0;
 
-unsigned int mmapped_dma=0;
-
 uint64_t downlink_frequency[MAX_NUM_CCs][4];
 int64_t uplink_frequency_offset[MAX_NUM_CCs][4];
 char *uecap_file;
 
-runmode_t mode = normal_txrx;
-
-#if MAX_NUM_CCs == 1
-double tx_gain[MAX_NUM_CCs][4] = {{20,0,0,0}};
-double rx_gain[MAX_NUM_CCs][4] = {{110,0,0,0}};
-#else
-double tx_gain[MAX_NUM_CCs][4] = {{20,0,0,0},{20,0,0,0}};
-double rx_gain[MAX_NUM_CCs][4] = {{110,0,0,0},{20,0,0,0}};
-#endif
-
-int chain_offset = 0;
-int numerology = 0;
 double cpuf;
 
 /*------------------------------------------------------------------------*/
@@ -133,6 +119,9 @@ void exit_function(const char *file, const char *function, const int line, const
   if (RC.ru == NULL)
     exit(-1); // likely init not completed, prevent crash or hang, exit now...
 
+  // Signal worker threads (ru_thread, L1) to stop before tearing down the radio
+  oai_exit = 1;
+
   for (ru_id=0; ru_id<RC.nb_RU; ru_id++) {
     if (RC.ru[ru_id] == NULL) {
       continue;
@@ -140,6 +129,10 @@ void exit_function(const char *file, const char *function, const int line, const
     if (RC.ru[ru_id]->ifdevice.trx_stop_func) {
       RC.ru[ru_id]->ifdevice.trx_stop_func(&RC.ru[ru_id]->ifdevice);
       RC.ru[ru_id]->ifdevice.trx_stop_func = NULL;
+    }
+    if (RC.ru[ru_id]->rfdevice.trx_stop_func) {
+      RC.ru[ru_id]->rfdevice.trx_stop_func(&RC.ru[ru_id]->rfdevice);
+      RC.ru[ru_id]->rfdevice.trx_stop_func = NULL;
     }
     if (RC.ru[ru_id]->rfdevice.trx_end_func) {
       if (RC.ru[ru_id]->rfdevice.trx_get_stats_func) {
@@ -150,10 +143,6 @@ void exit_function(const char *file, const char *function, const int line, const
       RC.ru[ru_id]->rfdevice.trx_end_func = NULL;
     }
 
-    if (RC.ru[ru_id]->ifdevice.trx_stop_func) {
-      RC.ru[ru_id]->ifdevice.trx_stop_func(&RC.ru[ru_id]->ifdevice);
-      RC.ru[ru_id]->ifdevice.trx_stop_func = NULL;
-    }
     if (RC.ru[ru_id] && RC.ru[ru_id]->ifdevice.trx_end_func) {
       if (RC.ru[ru_id]->ifdevice.trx_get_stats_func) {
         RC.ru[ru_id]->ifdevice.trx_get_stats_func(&RC.ru[ru_id]->ifdevice);
@@ -163,8 +152,6 @@ void exit_function(const char *file, const char *function, const int line, const
       RC.ru[ru_id]->ifdevice.trx_end_func = NULL;
     }
   }
-
-  oai_exit = 1;
 
   if (assert) {
     abort();
@@ -189,10 +176,14 @@ static int create_gNB_tasks(ngran_node_t node_type, configmodule_interface_t *cf
 
   RCconfig_verify(cfg, node_type);
 
+  nr_cell_sched_t *cell = NULL; // This is still assuming RC.nb_nr_macrlc_inst is always 1, need to find a better way when RC.nb_nr_macrlc_inst is > 1
   if (RC.nb_nr_macrlc_inst > 0)
-    RCconfig_nr_macrlc(cfg);
+    RCconfig_nr_macrlc(cfg, &cell);
 
-  if (RC.nb_nr_L1_inst>0) AssertFatal(l1_north_init_gNB()==0,"could not initialize L1 north interface\n");
+  if (RC.nb_nr_L1_inst > 0) {
+    int ret = l1_north_init_gNB();
+    AssertFatal(ret == 0, "could not initialize L1 north interface\n");
+  }
 
   AssertFatal (gnb_nb <= RC.nb_nr_inst,
                "Number of gNB is greater than gNB defined in configuration file (%d/%d)!",
@@ -411,7 +402,7 @@ int stop_L1(module_id_t gnb_id)
  * Restart the nr-softmodem after it has been soft-stopped with stop_L1L2()
  */
 #include "openair2/LAYER2/NR_MAC_gNB/mac_proto.h"
-int start_L1L2(module_id_t gnb_id)
+int start_L1L2(module_id_t gnb_id, nr_cell_sched_t *cell)
 {
   LOG_I(GNB_APP, "starting nr-softmodem\n");
   /* block threads */
@@ -419,12 +410,12 @@ int start_L1L2(module_id_t gnb_id)
   sync_var = -1;
 
   /* update config */
-  gNB_MAC_INST *mac = RC.nrmac[0];
-  NR_ServingCellConfigCommon_t *scc = mac->common_channels[0].ServingCellConfigCommon;
-  nr_mac_config_scc(mac, scc, &mac->radio_config);
+  gNB_MAC_INST *mac = RC.nrmac[gnb_id];
+  NR_ServingCellConfigCommon_t *scc = cell->common_channels.ServingCellConfigCommon;
+  nr_mac_config_scc(mac, cell, scc, &cell->radio_config);
 
-  NR_BCCH_BCH_Message_t *mib = mac->common_channels[0].mib;
-  const NR_BCCH_DL_SCH_Message_t *sib1 = mac->common_channels[0].sib1;
+  NR_BCCH_BCH_Message_t *mib = cell->common_channels.mib;
+  const NR_BCCH_DL_SCH_Message_t *sib1 = cell->common_channels.sib1;
   f1ap_setup_req_t *sr = mac->f1_config.setup_req;
   DevAssert(sr->num_cells_available == 1);
   f1ap_served_cell_info_t *info = &sr->cell[0].info;
@@ -520,7 +511,6 @@ int main( int argc, char **argv ) {
   setvbuf(stdout, NULL, _IONBF, 0);
   setvbuf(stderr, NULL, _IONBF, 0);
 #endif
-  mode = normal_txrx;
   logInit();
   lock_memory_to_ram();
   get_options(uniqCfg);
@@ -624,7 +614,7 @@ int main( int argc, char **argv ) {
 
     for (ru_id=0; ru_id<RC.nb_RU; ru_id++) {
       RC.ru[ru_id]->rf_map.card=0;
-      RC.ru[ru_id]->rf_map.chain=CC_id+chain_offset;
+      RC.ru[ru_id]->rf_map.chain = CC_id;
       if (ru_id==0) sl_ahead = RC.ru[ru_id]->sl_ahead;	
       else AssertFatal(RC.ru[ru_id]->sl_ahead != RC.ru[0]->sl_ahead,"RU %d has different sl_ahead %d than RU 0 %d\n",ru_id,RC.ru[ru_id]->sl_ahead,RC.ru[0]->sl_ahead);
     }

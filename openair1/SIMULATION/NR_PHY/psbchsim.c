@@ -38,6 +38,10 @@ void e1_bearer_context_modif(const e1ap_bearer_mod_req_t *req)
 {
   abort();
 }
+void e1_bearer_context_mod_confirm(const e1ap_bearer_mod_confirm_t *conf)
+{
+  abort();
+}
 void e1_bearer_release_cmd(const e1ap_bearer_release_cmd_t *cmd)
 {
   abort();
@@ -56,7 +60,7 @@ void get_num_re_dmrs(nfapi_nr_ue_pusch_pdu_t *pusch_pdu, uint8_t *nb_dmrs_re_per
 uint64_t downlink_frequency[MAX_NUM_CCs][4];
 int64_t uplink_frequency_offset[MAX_NUM_CCs][4];
 THREAD_STRUCT thread_struct;
-openair0_config_t openair0_cfg[MAX_CARDS];
+openair0_config_t openair0_cfg_g[MAX_CARDS] = {};
 
 RAN_CONTEXT_t RC;
 char *uecap_file;

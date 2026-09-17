@@ -1440,17 +1440,29 @@ void rrc_gNB_send_NGAP_HANDOVER_FAILURE(gNB_RRC_INST *rrc, ngap_handover_failure
 /** @brief Process NG Handover Request message (8.4.2.2 3GPP TS 38.413) */
 int rrc_gNB_process_Handover_Request(gNB_RRC_INST *rrc, ngap_handover_request_t *msg)
 {
-  // Check if UE context already exists for this AMF UE NGAP ID
   rrc_gNB_ue_context_t *existing_ue_context = rrc_gNB_get_ue_context_by_amf_ue_ngap_id(rrc, msg->amf_ue_ngap_id);
   if (existing_ue_context != NULL) {
-    LOG_E(RRC, "UE context already exists for AMF UE NGAP ID %ld, cannot process handover request\n", msg->amf_ue_ngap_id);
-    ngap_handover_failure_t fail = {
-        .amf_ue_ngap_id = msg->amf_ue_ngap_id,
-        .cause.type = NGAP_CAUSE_RADIO_NETWORK,
-        .cause.value = NGAP_CAUSE_RADIO_NETWORK_HO_FAILURE_IN_TARGET_5GC_NGRAN_NODE_OR_TARGET_SYSTEM,
-    };
-    rrc_gNB_send_NGAP_HANDOVER_FAILURE(rrc, &fail);
-    return -1;
+    gNB_RRC_UE_t *ue = &existing_ue_context->ue_context;
+    /* A UE with this AMF-UE-NGAP-ID is already present on this node as an N2
+     * source. This can happen when source and target NG-RAN node are the same or
+     * when the UE is already in a N2 HO procedure. Allow the request only while that
+     * UE is still in N2 source preparation (target not yet allocated), otherwise reject
+     * to prevent duplicate target contexts. */
+    const bool n2_source_only = ue->ho_context && ue->ho_context->source && !ue->ho_context->target;
+    if (!n2_source_only) {
+      LOG_E(NR_RRC,
+            "Reject Handover Request: ongoing procedure for UE %u (AMF UE NGAP ID %ld)\n",
+            ue->rrc_ue_id,
+            msg->amf_ue_ngap_id);
+      ngap_handover_failure_t fail = {
+          .amf_ue_ngap_id = msg->amf_ue_ngap_id,
+          .cause.type = NGAP_CAUSE_RADIO_NETWORK,
+          .cause.value = NGAP_CAUSE_RADIO_NETWORK_INTERACTION_WITH_OTHER_PROCEDURE,
+      };
+      rrc_gNB_send_NGAP_HANDOVER_FAILURE(rrc, &fail);
+      return -1;
+    }
+    LOG_I(NR_RRC, "N2 HO to self (AMF UE NGAP ID %ld): creating target context for UE %u\n", msg->amf_ue_ngap_id, ue->rrc_ue_id);
   }
 
   // Get cell by cell_id
@@ -1492,13 +1504,22 @@ int rrc_gNB_process_Handover_Request(gNB_RRC_INST *rrc, ngap_handover_request_t 
     return -1;
   }
 
+  // Create UE context
+  rrc_gNB_ue_context_t *ue_context_p = rrc_gNB_create_ue_context(du->assoc_id, UINT16_MAX, rrc, UINT64_MAX, UINT32_MAX);
+  if (!ue_context_p) {
+    ngap_handover_failure_t fail = {
+        .amf_ue_ngap_id = msg->amf_ue_ngap_id,
+        .cause.type = NGAP_CAUSE_RADIO_NETWORK,
+        .cause.value = NGAP_CAUSE_RADIO_NETWORK_HO_FAILURE_IN_TARGET_5GC_NGRAN_NODE_OR_TARGET_SYSTEM,
+    };
+    rrc_gNB_send_NGAP_HANDOVER_FAILURE(rrc, &fail);
+    return -1;
+  }
+
   uint16_t pci = cell->info.pci;
   LOG_I(NR_RRC, "Received Handover Request (on NR Cell ID=%lu, PCI=%u) \n", msg->nr_cell_id, pci);
 
-  // Create UE context
-  rrc_gNB_ue_context_t *ue_context_p = rrc_gNB_create_ue_context(du->assoc_id, UINT16_MAX, rrc, UINT64_MAX, UINT32_MAX);
   gNB_RRC_UE_t *UE = &ue_context_p->ue_context;
-
   // allocate context for target
   UE->ho_context = alloc_ho_ctx(HO_CTX_TARGET);
   UE->ho_context->target->cell = cell;
@@ -1538,7 +1559,7 @@ int rrc_gNB_process_Handover_Request(gNB_RRC_INST *rrc, ngap_handover_request_t 
 
   // Process all PDU Session Resource Setup items from handover request
   DevAssert(msg->nb_of_pdusessions <= NR_MAX_NB_PDU_SESSIONS);
-  pdusession_t to_setup[NR_MAX_NB_PDU_SESSIONS];
+  pdusession_t to_setup[NR_MAX_NB_PDU_SESSIONS] = {0};
   for (int i = 0; i < msg->nb_of_pdusessions; i++) {
     ho_request_pdusession_t *ho_pdu = &msg->pduSessionResourceSetupList[i];
     pdusession_t *pdu = &to_setup[i];
@@ -1980,6 +2001,44 @@ int rrc_gNB_process_NGAP_PDUSESSION_RELEASE_COMMAND(ngap_pdusession_release_comm
   free_e1ap_context_mod_request(&req);
   init_delayed_action(&UE->delayed_action);
   return 0;
+}
+
+/** @brief Send NGAP PDU Session Resource Notify (TS 38.413 section 8.2.4) after local release
+ * (triggered by TS 23.527 clause 5.3.3.1) */
+void rrc_gNB_send_NGAP_PDUSESSION_RESOURCE_NOTIFY(gNB_RRC_INST *rrc, gNB_RRC_UE_t *UE, uint8_t xid)
+{
+  MessageDef *msg_p = itti_alloc_new_message(TASK_RRC_GNB, rrc->module_id, NGAP_PDUSESSION_RESOURCE_NOTIFY);
+  ngap_pdusession_resource_notify_t *notify = &NGAP_PDUSESSION_RESOURCE_NOTIFY(msg_p);
+  notify->gNB_ue_ngap_id = UE->rrc_ue_id;
+
+  FOR_EACH_SEQ_ARR (rrc_pdu_session_param_t *, session, &UE->pduSessions) {
+    if (xid != session->xid || session->status != PDU_SESSION_STATUS_NOTIFYONRELEASE)
+      continue;
+    DevAssert(notify->nb_pdu_sessions_released < NR_MAX_NB_PDU_SESSIONS);
+    ngap_pdusession_notify_item_t *item = &notify->pdu_sessions[notify->nb_pdu_sessions_released++];
+    item->pdu_session_id = session->param.pdusession_id;
+    item->cause.type = NGAP_CAUSE_TRANSPORT;
+    item->cause.value = NGAP_CAUSE_TRANSPORT_RESOURCE_UNAVAILABLE;
+  }
+
+  if (notify->nb_pdu_sessions_released == 0) {
+    LOG_E(NR_RRC, "UE %u: PDU Session Resource Notify xid %u with no sessions\n", UE->rrc_ue_id, xid);
+    itti_free(ITTI_MSG_ORIGIN_ID(msg_p), msg_p);
+    return;
+  }
+
+  const int n = notify->nb_pdu_sessions_released;
+  int released_ids[NR_MAX_NB_PDU_SESSIONS];
+  for (int i = 0; i < n; ++i)
+    released_ids[i] = notify->pdu_sessions[i].pdu_session_id;
+
+  LOG_I(NR_RRC, "NGAP PDU Session Resource Notify: rrc_ue_id %u nb_released %d\n", notify->gNB_ue_ngap_id, n);
+  itti_send_msg_to_task(TASK_NGAP, rrc->module_id, msg_p);
+  for (int i = 0; i < n; ++i)
+    rm_pduSession(&UE->pduSessions, &UE->drbs, released_ids[i]);
+
+  if (seq_arr_size(&UE->drbs) == 0 && UE->Srb[SRB2].Active)
+    rrc_gNB_cleanup_srb2_only_connected(rrc, UE);
 }
 
 /** @brief Handle NGAP Paging Indication from the AMF.

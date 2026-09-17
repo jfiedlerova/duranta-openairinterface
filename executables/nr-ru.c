@@ -247,51 +247,6 @@ static void rx_rf(RU_t *ru, int *frame, int *slot)
   stop_meas(&ru->rx_fhaul);
 }
 
-static radio_tx_gpio_flag_t get_gpio_flags(RU_t *ru, int slot)
-{
-  radio_tx_gpio_flag_t flags_gpio = 0;
-  NR_DL_FRAME_PARMS *fp = ru->nr_frame_parms;
-  openair0_config_t *cfg0 = &ru->openair0_cfg;
-
-  switch (cfg0->gpio_controller) {
-    case RU_GPIO_CONTROL_GENERIC:
-      // currently we switch beams at the beginning of a slot and we take the beam index of the first symbol of this slot
-      // we only send the beam to the gpio if the beam is different from the previous slot
-
-      if (ru->common.beam_id) {
-        int prev_slot = (slot - 1 + fp->slots_per_frame) % fp->slots_per_frame;
-        uint16_t **beam_ids = ru->common.beam_id;
-        uint16_t prev_beam = beam_ids[prev_slot * fp->symbols_per_slot][0];
-        int beam = beam_ids[slot * fp->symbols_per_slot][0];
-        if (prev_beam != beam) {
-          flags_gpio = beam | TX_GPIO_CHANGE; // enable change of gpio
-          LOG_I(HW, "slot %d, beam %d\n", slot, beam_ids[slot * fp->symbols_per_slot][0]);
-        }
-      }
-      break;
-
-    case RU_GPIO_CONTROL_INTERDIGITAL: {
-      // the beam index is written in bits 8-10 of the flags
-      // bit 11 enables the gpio programming
-      int beam = 0;
-      if ((slot % 10 == 0) && ru->common.beam_id && (ru->common.beam_id[slot * fp->symbols_per_slot][0] < 64)) {
-        // beam = ru->common.beam_id[0][slot*fp->symbols_per_slot] | 64;
-        beam = 1024; // hardcoded now for beam32 boresight
-        // beam = 127; //for the sake of trying beam63
-        LOG_D(HW, "slot %d, beam %d\n", slot, beam);
-      }
-      flags_gpio = beam | TX_GPIO_CHANGE;
-      // flags_gpio |= beam << 8; // MSB 8 bits are used for beam
-      LOG_I(HW, "slot %d, beam %d, flags_gpio %d\n", slot, beam, flags_gpio);
-      break;
-    }
-    default:
-      AssertFatal(false, "illegal GPIO controller %d\n", cfg0->gpio_controller);
-  }
-
-  return flags_gpio;
-}
-
 int tx_rf_symbols(RU_t *ru, int frame, int slot, uint64_t timestamp, int start_symbol, int num_symbols)
 {
   RU_proc_t *proc = &ru->proc;
@@ -307,7 +262,6 @@ int tx_rf_symbols(RU_t *ru, int frame, int slot, uint64_t timestamp, int start_s
   int sf_extension = 0;
   int siglen = get_samples_per_slot(slot, fp);
   radio_tx_burst_flag_t flags_burst = TX_BURST_INVALID;
-  radio_tx_gpio_flag_t flags_gpio = 0;
   int transmitted_symbols = num_symbols;
 
   if (cfg->cell_config.frame_duplex_type.value == TDD && !get_softmodem_params()->continuous_tx && !IS_SOFTMODEM_RFSIM) {
@@ -359,10 +313,7 @@ int tx_rf_symbols(RU_t *ru, int frame, int slot, uint64_t timestamp, int start_s
     siglen = get_samples_symbol_duration(fp, slot, start_symbol, num_symbols);
   }
 
-  if (ru->openair0_cfg.gpio_controller != RU_GPIO_CONTROL_NONE)
-    flags_gpio = get_gpio_flags(ru, slot);
-
-  const int flags = flags_burst | (flags_gpio << 4);
+  const int flags = flags_burst;
   proc->first_tx = 0;
 
   int nt = ru->nb_tx;
@@ -395,6 +346,35 @@ int tx_rf_symbols(RU_t *ru, int frame, int slot, uint64_t timestamp, int start_s
   return transmitted_symbols;
 }
 
+// Pushes the per-antenna split 8 analog beam IDs assigned to this slot's symbols down to
+// the RF device, one trx_set_beams() call per symbol at which the beam vector changes.
+// However, USRP GPIO-controlled beamforming currently only handles one beam.
+//
+// Only calls trx_set_beams() when the beam vector actually changes between symbols, to avoid
+// issuing redundant beam-switch commands to real hardware.
+static void ctrl_rf(RU_t *ru, int frame, int slot, uint64_t timestamp)
+{
+  NR_DL_FRAME_PARMS *fp = ru->nr_frame_parms;
+  int nb_tx = ru->nb_tx;
+  uint16_t **beam_id = ru->gNB_list[0]->common_vars.beam_id;
+
+  uint16_t last_beams[nb_tx];
+  memcpy(last_beams, beam_id[slot * fp->symbols_per_slot], nb_tx * sizeof(uint16_t));
+  uint64_t event_ts = timestamp + ru->ts_offset;
+  LOG_D(NR_PHY, "RU Control [%d.%d]: set beams at symbol 0, ts %lu\n", frame, slot, event_ts);
+  ru->rfdevice.trx_set_beams(&ru->rfdevice, last_beams, nb_tx, event_ts);
+
+  for (int j = 1; j < fp->symbols_per_slot; j++) {
+    uint16_t *cur_beams = beam_id[slot * fp->symbols_per_slot + j];
+    if (memcmp(cur_beams, last_beams, nb_tx * sizeof(uint16_t)) == 0)
+      continue;
+    memcpy(last_beams, cur_beams, nb_tx * sizeof(uint16_t));
+    event_ts = timestamp + ru->ts_offset + get_samples_symbol_duration(fp, slot, 0, j);
+    LOG_D(NR_PHY, "RU Control [%d.%d]: beam switch at symbol %d, ts %lu\n", frame, slot, j, event_ts);
+    ru->rfdevice.trx_set_beams(&ru->rfdevice, last_beams, nb_tx, event_ts);
+  }
+}
+
 void tx_rf(RU_t *ru, int frame, int slot, uint64_t timestamp)
 {
   tx_rf_symbols(ru, frame, slot, timestamp, 0, 14);
@@ -422,8 +402,8 @@ void fill_rf_config(RU_t *ru, char *rf_config_file)
 
   cfg->configFilename = rf_config_file;
 
-  AssertFatal(ru->nb_tx > 0 && ru->nb_tx <= 8, "openair0 does not support more than 8 antennas\n");
-  AssertFatal(ru->nb_rx > 0 && ru->nb_rx <= 8, "openair0 does not support more than 8 antennas\n");
+  AssertFatal(ru->nb_tx > 0 && ru->nb_tx <= OPENAIR0_MAX_ANTENNAS, "openair0 does not support more than %d antennas\n", OPENAIR0_MAX_ANTENNAS);
+  AssertFatal(ru->nb_rx > 0 && ru->nb_rx <= OPENAIR0_MAX_ANTENNAS, "openair0 does not support more than %d antennas\n", OPENAIR0_MAX_ANTENNAS);
 
   cfg->num_rb_dl = N_RB;
   cfg->tx_num_channels = ru->nb_tx;
@@ -431,6 +411,7 @@ void fill_rf_config(RU_t *ru, char *rf_config_file)
   cfg->num_distributed_ru = 1;
   LOG_I(PHY,"Setting RF config for N_RB %d, NB_RX %d, NB_TX %d\n",cfg->num_rb_dl,cfg->rx_num_channels,cfg->tx_num_channels);
   LOG_I(PHY,"tune_offset %.0f Hz, sample_rate %.0f Hz\n",cfg->tune_offset,cfg->sample_rate);
+  cfg->nr_flag = 1;
 
   for (int i = 0; i < ru->nb_tx; i++) {
     if (ru->if_frequency == 0) {
@@ -470,6 +451,7 @@ void fill_split7_2_config(split7_config_t *split7, const nfapi_nr_config_request
   const nfapi_nr_cell_config_t *cell_config = &config->cell_config;
   const nfapi_nr_carrier_config_t *carrier_config = &config->carrier_config;
 
+  split7->mu = config->ssb_config.scs_common.value;
   DevAssert(prach_config->prach_ConfigurationIndex.tl.tag == NFAPI_NR_CONFIG_PRACH_CONFIG_INDEX_TAG);
   split7->prach_index = prach_config->prach_ConfigurationIndex.value;
   AssertFatal(prach_config->num_prach_fd_occasions.value >= 1, "must have at least one PRACH occasion\n");
@@ -549,25 +531,6 @@ int setup_RU_buffers(RU_t *ru)
   }
 
   return(0);
-}
-
-void ru_tx_func(void *param)
-{
-  processingData_RU_t *info = (processingData_RU_t *) param;
-  RU_t *ru = info->ru;
-  int frame_tx = info->frame_tx;
-  int slot_tx = info->slot_tx;
-
-  // do TX front-end processing if needed (precoding and/or IDFTs)
-  if (ru->feptx_prec)
-    ru->feptx_prec(ru,frame_tx,slot_tx);
-
-  // do OFDM with/without TX front-end processing  if needed
-  if (ru->feptx_ofdm)
-    ru->feptx_ofdm(ru, frame_tx, slot_tx);
-
-  if (ru->fh_south_out)
-    ru->fh_south_out(ru, frame_tx, slot_tx, info->timestamp_tx);
 }
 
 /* @brief wait for the next RX TTI to be free
@@ -654,6 +617,10 @@ void *ru_thread(void *param)
       t = ru->ifdevice.get_internal_parameter("fh_if4p5_south_out");
       if (t != NULL)
         ru->fh_south_out = t;
+      // this is temporarily until the new split 7.2 API
+      t = ru->ifdevice.get_internal_parameter("fh_if4p5_ctrl");
+      if (t != NULL)
+        ru->fh_south_ctrl = t;
     }
 
     int cpu = sched_getcpu();
@@ -690,10 +657,9 @@ void *ru_thread(void *param)
 
   // Start RF device if any
   if (ru->start_rf) {
-    if (ru->start_rf(ru) != 0)
-      LOG_E(HW, "Could not start the RF device\n");
-    else
-      LOG_I(PHY, "RU %d rf device ready\n", ru->idx);
+    ret = ru->start_rf(ru);
+    AssertFatal(ret == 0, "RU %u: start_rf() ret %d: cannot start RF device\n", ru->idx, ret);
+    LOG_I(PHY, "RU %d rf device ready\n", ru->idx);
   } else
     LOG_I(PHY, "RU %d no rf device\n", ru->idx);
 
@@ -852,12 +818,6 @@ void kill_NR_RU_proc(int inst) {
   RU_t *ru = RC.ru[inst];
   RU_proc_t *proc = &ru->proc;
 
-  if (ru->if_south != REMOTE_IF4p5) {
-    abortTpool(ru->threadPool);
-    abortNotifiedFIFO(ru->respfeprx);
-    abortNotifiedFIFO(ru->respfeptx);
-  }
-
   /* Note: it seems pthread_FH and and FEP thread below both use
    * mutex_fep/cond_fep. Thus, we unlocked above for pthread_FH above and do
    * the same for FEP thread below again (using broadcast() to ensure both
@@ -866,7 +826,20 @@ void kill_NR_RU_proc(int inst) {
   proc->instance_cnt_fep[0] = 0;
   pthread_cond_broadcast(proc->cond_fep);
   pthread_mutex_unlock(proc->mutex_fep);
+
+  /* Join the RU thread BEFORE aborting the RU thread pool: ru_thread() is a
+   * producer of that pool (nr_fep_tp()/feptx push tasks on every UL/DL slot).
+   * abortTpool() frees the pool's queues, so a push from ru_thread() after
+   * that point races a destroyed mutex (EINVAL) and asserts. oai_exit is
+   * already set at this point and the RF reads are non-blocking, so the join
+   * returns promptly. */
   pthread_join(proc->pthread_FH, NULL);
+
+  if (ru->if_south != REMOTE_IF4p5) {
+    abortTpool(ru->threadPool);
+    abortNotifiedFIFO(ru->respfeprx);
+    abortNotifiedFIFO(ru->respfeptx);
+  }
 
   // everything should be stopped now, we can safely stop the RF device
   if (ru->stop_rf == NULL) {
@@ -893,6 +866,7 @@ void set_function_spec_param(RU_t *ru)
       ru->nr_start_if = NULL; // no if interface
       ru->fh_south_in = rx_rf; // local synchronous RF RX
       ru->fh_south_out = tx_rf; // local synchronous RF TX
+      ru->fh_south_ctrl = ctrl_rf; // beam API
       ru->start_rf = start_rf; // need to start the local RF interface
       ru->stop_rf = stop_rf;
       ru->start_write_thread = start_write_thread; // starting RF TX in different thread
@@ -1165,14 +1139,7 @@ static void NRRCconfig_RU(configmodule_interface_t *cfg)
     ru->num_bands = param[RU_BAND_LIST_IDX].numelt;
     for (int i = 0; i < ru->num_bands; i++)
       ru->band[i] = param[RU_BAND_LIST_IDX].iptr[i];
-    ru->openair0_cfg.nr_flag = *param[RU_NR_FLAG].iptr;
     // TODO remove band from RU?
-    ru->openair0_cfg.nr_scs_for_raster = *param[RU_NR_SCS_FOR_RASTER].iptr;
-    LOG_D(PHY,
-          "[RU %d] Setting nr_flag %d, nr_scs_for_raster %d\n",
-          j,
-          ru->openair0_cfg.nr_flag,
-          ru->openair0_cfg.nr_scs_for_raster);
     ru->openair0_cfg.rxfh_cores[0] = *param[RU_RXFH_CORE_ID].iptr;
     ru->openair0_cfg.txfh_cores[0] = *param[RU_TXFH_CORE_ID].iptr;
     ru->num_tpcores = *param[RU_NUM_TP_CORES].iptr;

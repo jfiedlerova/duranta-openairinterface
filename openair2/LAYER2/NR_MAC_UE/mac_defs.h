@@ -166,6 +166,14 @@ typedef enum {
 #undef UE_STATE
 } NR_UE_L2_STATE_t;
 
+#define MAX_NB_CYCLIC_SHIFT (4)
+typedef enum {
+  pucch_format0_nr  = 1,
+  pucch_format1_nr  = 2,
+  pucch_format2_nr  = 3,
+  pucch_format3_nr  = 4,
+  pucch_format4_nr  = 5
+} pucch_format_nr_t;
 typedef struct {
   pucch_format_nr_t format;
   uint8_t startingSymbolIndex;
@@ -274,11 +282,6 @@ typedef struct {
 } NR_PRACH_RESOURCES_t;
 
 typedef struct {
-  float ssb_per_ro;
-  int preambles_per_ssb;
-} ssb_ro_preambles_t;
-
-typedef struct {
   bool active;
   uint32_t preamble_index;
   uint32_t ssb_index;
@@ -380,6 +383,8 @@ typedef struct {
   bool active;
   bool ack_received;
   uint8_t  pucch_resource_indicator;
+  /* use pucch-ResourceCommon table (TS 38.213 9.2.1) for this HARQ-ACK */
+  bool pucch_resource_common;
   frame_t ul_frame;
   int ul_slot;
   uint8_t ack;
@@ -416,8 +421,10 @@ typedef struct {
 typedef struct {
   int rsrp_dBm;
   uint8_t ri;
-  uint16_t i1;
-  uint8_t i2;
+  uint8_t i_1_1;
+  uint8_t i_1_2;
+  uint8_t i_1_3;
+  uint8_t i_2;
   uint8_t cqi;
 } NR_CSIRS_meas_t;
 
@@ -618,7 +625,6 @@ typedef struct NR_UE_MAC_INST_s {
   dci_pdu_rel15_t def_dci_pdu_rel15[NR_MAX_SLOTS_PER_FRAME][8];
 
   // Defined for abstracted mode
-  nr_downlink_indication_t dl_info;
   NR_UE_DL_HARQ_STATUS_t dl_harq_info[NR_MAX_HARQ_PROCESSES][2]; // one harq process for each codeword
   NR_UE_UL_HARQ_INFO_t ul_harq_info[NR_MAX_HARQ_PROCESSES];
 
@@ -626,8 +632,6 @@ typedef struct NR_UE_MAC_INST_s {
   A_SEQUENCE_OF(NR_TAG_t) TAG_list;
   NR_TimeAlignmentTimer_t timeAlignmentTimerCommon;
   NR_timer_t time_alignment_timer;
-
-  pthread_mutex_t mutex_dl_info;
 
   //SIDELINK MAC PARAMETERS
   sl_nr_ue_mac_params_t *SL_MAC_PARAMS;
@@ -638,6 +642,7 @@ typedef struct NR_UE_MAC_INST_s {
   bool pusch_power_control_initialized;
   int delta_msg2;
   bool msg3_C_RNTI;
+  bool sr_fallback_ra_triggered; // SR-fallback RA triggered; block re-trigger until PUCCH SR resource is restored
   pthread_mutex_t if_mutex;
   ue_mac_stats_t stats;
   notifiedFIFO_t input_nf;

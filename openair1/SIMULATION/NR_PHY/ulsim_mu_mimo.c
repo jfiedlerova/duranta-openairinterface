@@ -12,7 +12,6 @@
 #include <errno.h>
 #include <bits/getopt_core.h>
 #include "common/utils/nr/nr_common.h"
-#include "common/utils/var_array.h"
 #define inMicroS(a) (((double)(a)) / (get_cpu_freq_GHz() * 1000.0))
 #include "SIMULATION/LTE_PHY/common_sim.h"
 #include "common/utils/assertions.h"
@@ -129,6 +128,10 @@ void e1_bearer_context_modif(const e1ap_bearer_mod_req_t *req)
 {
   abort();
 }
+void e1_bearer_context_mod_confirm(const e1ap_bearer_mod_confirm_t *conf)
+{
+  abort();
+}
 void e1_bearer_release_cmd(const e1ap_bearer_release_cmd_t *cmd)
 {
   abort();
@@ -156,7 +159,7 @@ nrUE_params_t *get_nrUE_params(void)
 }
 // needed for some functions
 uint16_t n_rnti = 0x1234;
-openair0_config_t openair0_cfg[MAX_CARDS];
+openair0_config_t openair0_cfg_g[MAX_CARDS];
 
 configmodule_interface_t *uniqCfg = NULL;
 int main(int argc, char *argv[])
@@ -541,7 +544,7 @@ int main(int argc, char *argv[])
   gNB->num_pusch_symbols_per_thread = 1;
   gNB->dmrs_num_antennas_per_thread = num_antennas_per_thread;
   gNB->RU_list[0] = calloc_or_fail(1, sizeof(**gNB->RU_list));
-  gNB->RU_list[0]->rfdevice.openair0_cfg = openair0_cfg;
+  gNB->RU_list[0]->rfdevice.openair0_cfg = openair0_cfg_g;
 
   if (setAffinity == false)
     initFloatingCoresTpool(threadCnt, &gNB->threadPool, false, "gNB-tpool");
@@ -632,23 +635,24 @@ int main(int argc, char *argv[])
                                              }};
 
   RC.nb_nr_macrlc_inst = 1;
-  mac_top_init_gNB(ngran_gNB, scc, &conf, &rlc_config);
-  RC.nrmac[0]->beam_info = (NR_beam_info_t){.beams_per_period = 1};
-  nr_mac_config_scc(RC.nrmac[0], scc, &conf);
+  nr_cell_sched_t *cell;
+  mac_top_init_gNB(ngran_gNB, scc, &conf, &rlc_config, &cell);
+  cell->beam_info = (NR_beam_info_t){.beams_per_period = 1};
+  nr_mac_config_scc(RC.nrmac[0], cell, scc, &conf);
 
   NR_UE_NR_Capability_t *UE_Capability_nr = CALLOC(1, sizeof(NR_UE_NR_Capability_t));
   prepare_sim_uecap(UE_Capability_nr, scc, mu, N_RB_UL, 0, mcs_table);
   rnti_t rnti = 0x1234;
   int uid = 0;
   int ssb_index = 0;
-  NR_CellGroupConfig_t *secondaryCellGroup = get_default_secondaryCellGroup(scc, UE_Capability_nr, 0, 1, &conf, uid, ssb_index);
+  NR_CellGroupConfig_t *secondaryCellGroup = get_default_secondaryCellGroup(scc, UE_Capability_nr, 0, 1, &conf, cell, uid, ssb_index);
   secondaryCellGroup->spCellConfig->reconfigurationWithSync = get_reconfiguration_with_sync(rnti, uid, scc, frame);
 
   NR_BCCH_BCH_Message_t *mib = get_new_MIB_NR(scc);
 
   // UE dedicated configuration
   for (int u = 0; u < NUM_UE; u++) {
-    nr_mac_add_test_ue(RC.nrmac[0], n_rnti + u, secondaryCellGroup);
+    nr_mac_add_test_ue(RC.nrmac[0], cell, n_rnti + u, secondaryCellGroup);
   }
   gNB->frame_parms.nb_antennas_tx = 1;
   gNB->frame_parms.nb_antennas_rx = n_rx;
@@ -751,6 +755,7 @@ int main(int argc, char *argv[])
 
   time_stats_t channel_stats = {0};
   time_stats_t noise_stats = {0};
+  init_sorted_list_meas(&gNB->phy_proc_rx, max_rounds * n_trials);
   uint32_t errors_decoding = 0;
 
   uint16_t pdu_bit_map = PUSCH_PDU_BITMAP_PUSCH_DATA;
@@ -869,8 +874,6 @@ int main(int argc, char *argv[])
 
   int ret = 1;
   for (SNR = snr0; SNR <= snr1 && !stop; SNR += snr_step) {
-    varArray_t *table_rx = initVarArray(1000, sizeof(double));
-
     reset_meas(&gNB->phy_proc_rx);
     reset_meas(&gNB->rx_pusch_stats);
     reset_meas(&gNB->rx_pusch_init_stats);
@@ -881,8 +884,6 @@ int main(int argc, char *argv[])
     reset_meas(&gNB->ulsch_layer_demapping_stats);
     reset_meas(&gNB->ulsch_unscrambling_stats);
     reset_meas(&gNB->ulsch_decoding_stats);
-    reset_meas(&gNB->ts_deinterleave);
-    reset_meas(&gNB->ts_rate_unmatch);
     reset_meas(&gNB->ts_ldpc_decode);
     reset_meas(&gNB->ulsch_channel_estimation_stats);
     reset_meas(&gNB->pusch_channel_estimation_antenna_processing_stats);
@@ -1428,7 +1429,7 @@ int main(int argc, char *argv[])
       }
 
       printf("\ngNB RX\n");
-      printDistribution(&gNB->phy_proc_rx, table_rx, "Total PHY proc rx");
+      printDistribution(&gNB->phy_proc_rx, "Total PHY proc rx");
       printStatIndent(&gNB->rx_pusch_stats, "RX PUSCH time");
       printStatIndent2(&gNB->ulsch_channel_estimation_stats, "ULSCH channel estimation time");
       printStatIndent3(&gNB->pusch_channel_estimation_antenna_processing_stats, "Antenna Processing time");
@@ -1445,18 +1446,11 @@ int main(int argc, char *argv[])
       gNB->ulsch_unscrambling_stats.trials = gNB->rx_pusch_symbol_processing_stats.trials;
       printStatIndent3(&gNB->ulsch_unscrambling_stats, "RX PUSCH unscrambling");
       printStatIndent(&gNB->ulsch_decoding_stats, "ULSCH total decoding time");
-      gNB->ts_deinterleave.trials = n_trials;
-      printStatIndent2(&gNB->ts_deinterleave, "ULSCH segment deinterleaving time");
-      gNB->ts_rate_unmatch.trials = n_trials;
-      printStatIndent2(&gNB->ts_rate_unmatch, "ULSCH segment rate matching time");
-      gNB->ts_ldpc_decode.trials = n_trials;
       printStatIndent2(&gNB->ts_ldpc_decode, "ULSCH segments decoding time");
       printStatIndent(&channel_stats, "Multipath Channel (CPU)");
       printStatIndent(&noise_stats, "Add Noise (CPU)");
       printf("\n");
     }
-
-    freeVarArray(table_rx);
 
     if (n_trials == 1)
       break;
@@ -1487,6 +1481,7 @@ int main(int argc, char *argv[])
       length_dmrs,
       num_dmrs_cdm_grps_no_data);
 
+  free_sorted_list_meas(&gNB->phy_proc_rx);
   free_MIB_NR(mib);
 
   free_nrLDPC_coding_interface(&gNB->nrLDPC_coding_interface);

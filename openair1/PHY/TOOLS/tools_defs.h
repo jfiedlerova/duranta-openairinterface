@@ -59,7 +59,7 @@ extern "C" {
     int dim2;
     int dim3;
     int dim4;
-    uint8_t data[] __attribute__((aligned(32)));
+    uint8_t data[] __attribute__((aligned(64)));
   } fourDimArray_t;
 
   static inline fourDimArray_t *allocateFourDimArray(int elmtSz, int dim1, int dim2, int dim3, int dim4)
@@ -220,6 +220,11 @@ extern "C" {
     };
   }
 
+  __attribute__((always_inline)) inline c32_t c32x16mulConj(const c16_t a, const c16_t b)
+  {
+    return (c32_t){.r = a.r * b.r + a.i * b.i, .i = a.r * b.i - a.i * b.r};
+  }
+
   __attribute__((always_inline)) inline c16_t c16xmulConstShift(const c16_t a, const int b, const int Shift)
   {
     return (c16_t){.r = (int16_t)((a.r * b) >> Shift), .i = (int16_t)((a.i * b) >> Shift)};
@@ -229,6 +234,13 @@ extern "C" {
     return (c32_t) {
       .r = ((a.r * b.r - a.i * b.i) >> Shift) + c.r,
       .i = ((a.r * b.i + a.i * b.r) >> Shift) + c.i
+    };
+  }
+
+  __attribute__((always_inline)) inline c64_t c64x16maddConjShift(const c16_t a, const c16_t b, const c64_t c, const int Shift) {
+    return (c64_t) {
+      .r = (((int64_t)a.r * b.r + (int64_t)a.i * b.i) >> Shift) + c.r,
+      .i = (((int64_t)a.r * b.i - (int64_t)a.i * b.r) >> Shift) + c.i
     };
   }
 
@@ -245,6 +257,31 @@ extern "C" {
         .r = a.r * b.r - a.i * b.i,
         .i = a.r * b.i + a.i * b.r
     };
+  }
+
+  /**
+   * @brief Complex doulbe conjugate product.
+   *
+   * @param a
+   * @param b
+   * @return = conj(a) * b
+   */
+  __attribute__((always_inline)) inline cd_t cdMulConj(const cd_t a, const cd_t b)
+  {
+    return (cd_t){.r = a.r * b.r + a.i * b.i, .i = a.r * b.i - a.i * b.r};
+  }
+
+  __attribute__((always_inline)) inline cd_t cdNorm(const cd_t a)
+  {
+    const double abs = sqrt(a.r * a.r + a.i * a.i);
+    DevAssert(abs != 0);
+    return (cd_t){.r = a.r / abs, .i = a.i / abs};
+  }
+
+  __attribute__((always_inline)) inline c16_t cd2c16(const cd_t a, const int16_t amp)
+  {
+    const cd_t n = cdNorm(a);
+    return (c16_t){.r = (int16_t)(n.r * amp), .i = (int16_t)(n.i * amp)};
   }
 
   // On N complex numbers
@@ -1123,14 +1160,12 @@ double compute_noise_variance(double txlev_sum,
 int32_t iSqrt(int32_t value);
 uint8_t log2_approx(uint32_t);
 uint8_t log2_approx64(unsigned long long int x);
-int16_t invSqrt(int16_t x);
-uint32_t angle(struct complex16 perrror);
 
 /// computes the number of factors 2 in x
 unsigned char factor2(unsigned int x);
 
 int8_t dB_fixed(uint32_t x);
-int8_t dB_fixed64(uint64_t x);
+int dB_fixed64(uint64_t x);
 int8_t dB_fixed2(uint32_t x,uint32_t y);
 int16_t dB_fixed_times10(uint32_t x);
 int16_t dB_fixed_x10(uint32_t x);

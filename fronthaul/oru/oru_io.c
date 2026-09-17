@@ -3,6 +3,7 @@
  */
 
 #include "oru_io.h"
+#include "oru_pcap.h"
 #include <rte_ether.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -205,6 +206,8 @@ int oru_io_init(oru_io_t *io, oru_io_config_t *conf)
   // 3. Initialize Timer
   if (fh_timer_init(&io->timer, conf->numerology) < 0)
     return -1;
+  if (conf->clock_timebase == FH_CLOCK_TAI)
+    fh_timer_set_timebase(&io->timer, FH_CLOCK_TAI);
   fh_timer_register_cb(&io->timer, conf->timer_cb, conf->timer_user_data);
 
   // 4. Initialize Send (on primary port)
@@ -258,6 +261,8 @@ int oru_io_send_uplane(oru_io_t *io, struct rte_mbuf **mbufs, uint32_t num_mbufs
     eth->ether_type = rte_cpu_to_be_16(ECPRI_ETHER_TYPE);
     rte_ether_addr_copy(&io->conf.du_macs[0], &eth->dst_addr);
     rte_ether_addr_copy(&io->local_macs[0], &eth->src_addr);
+
+    oru_pcap_write_uplane(mbufs[i], oru_pcap_mbuf_is_prach(mbufs[i]));
   }
 
   return fh_send_immediate(&io->send, mbufs, num_mbufs);

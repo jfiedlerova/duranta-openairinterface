@@ -6,7 +6,7 @@
 
 [[_TOC_]]
 
-This documentation describes the integration of LDPC coding for lookaside acceleration using O-RAN AAL/DPDK BBDEV in OAI, along with its usage.
+This section describes the integration of LDPC coding for lookaside acceleration using O-RAN AAL/DPDK BBDEV in OAI, along with its usage.
 For details on the implementation, please consult the [developer notes](../openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_aal/README.md).
 
 ## Requirements
@@ -25,6 +25,7 @@ The following DPDK versions are supported:
 
 #### AMD T2 Telco Accelerator Card
 
+- DPDK20.11.9
 - DPDK22.11
 - DPDK22.11.3
 
@@ -121,8 +122,73 @@ Lastly, we bind our accelerator with the `vfio-pci` driver.
 ```
 
 > [!NOTE]
-> For the AMD T2 Telco Accelerator Card, we can use this device directly.
-If you use an Intel vRAN accelerator, read on.
+> For the AMD T2 Telco Accelerator Card, we can use this device directly in a single process.  
+> If you use the T2 Telco Accelerator Card in more than one process in parallel, read the following hidden note.  
+> If you use an Intel vRAN accelerator, read the following section.
+
+<details> 
+<summary> Notes on enabling Virtual Functions (VFs) for the AMD T2 Telco Accelerator Card. </summary>
+
+This section explains how to enable the VFs in order to use the T2 Telco Accelerator Card in multiple processes or containers.
+This feature is available only for **DPDK 20.11.9** with patch `ACCL_BBDEV_DPDK20.11.3_ldpc_3.2.patch` and the corresponding board firmware.
+
+##### Clone and Build the `igb_uio` kernel module
+
+```bash
+git clone http://dpdk.org/git/dpdk-kmods ~/dpdk-kmods
+cd ~/dpdk-kmods/linux/igb_uio
+make
+```
+
+##### Insert the `igb_uio` kernel module
+
+Instructions below this line should be followed upon each system restart.
+
+```bash
+cd ~/dpdk-kmods/linux/igb_uio
+sudo modprobe uio
+sudo insmod igb_uio.ko 
+lsmod | grep uio
+```
+
+##### Bind the devices
+
+First bind the Physical Function to `igb_uio`.
+
+```bash
+sudo ~/dpdk-stable-20.11.9/usertools/dpdk-devbind.py -b igb_uio 0000:f7:00.0
+```
+Then create the VFs, there are 2 in this example but there can be up to 16 VFs.
+
+```bash
+echo 2 | sudo tee /sys/bus/pci/devices/0000\:f7\:00.0/max_vfs
+```
+
+Finally, bind the VFs to `vfio-pci`.
+
+```bash
+sudo ~/dpdk-stable-20.11.9/usertools/dpdk-devbind.py -b vfio-pci 0000:f7:00.4
+sudo ~/dpdk-stable-20.11.9/usertools/dpdk-devbind.py -b vfio-pci 0000:f7:00.5
+```
+
+##### Run the dpdk-admin app
+
+This app was built with DPDK and is located in the `app` directory in the build directory.
+
+**IMPORTANT:**
+- Make sure no other `dpdk-admin` app is running and no running task are yet trying to use the VFs.  
+  Otherwise the system may get in a deadlock.
+- Keep the `dpdk-admin` command running while using the VFs.
+  Do not stop it while any process is still using any VF.
+- `-l <cpu>` corresponds to the list of cores used by the DPDK threads of the admin app.  
+  It is isolated and exclusively reserved to the dpdk-admin app.
+- Pass the Physical Function address to option `-a`.  
+
+```bash
+sudo ~/dpdk-stable-20.11.9/build/app/dpdk-admin -a 0000:f7:00.0 --file-prefix PF -l 7 2>&1
+```
+
+</details>
 
 #### Additional Steps for Intel vRAN Accelerators
 
@@ -336,4 +402,98 @@ L1s = (
 }
 );
 ...
+```
+
+# OAI LDPC offload (Aurora)
+
+This section describes the integration of LDPC decoding for lookaside acceleration using Aurora from [Open Radio Systems GmbH](https://openradiosystems.com/) in OAI, along with its usage.
+
+The implementation of the LDPC offload library can be found [here](../openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_ors/). 
+
+## Requirements
+
+### Supported HW
+This LDPC offloading implementation just support the ORS [Aurora](https://openradiosystems.com/orsaurora.pdf) card. 
+The host system needs a PCIe slot with at least Gen3 and 8 lanes.
+
+### XDMA driver
+The XDMA kernel driver is required for host communication with the Aurora card. The recommended XDMA version can be found [here](https://github.com/openradiosystems/dma_ip_drivers/tree/reworked_xdma_main). It provided better performance than the original driver. The original driver can still be used and it can be found [here](https://github.com/Xilinx/dma_ip_drivers).
+
+## Building and Installing
+
+This Offloading has been tested with Ubuntu 22.04, Ubuntu 24.04, Debian 13 and RHEL 9.1.
+For RHEL 9.1 the optimized XDMA driver ([here](https://github.com/openradiosystems/dma_ip_drivers)) is required.
+
+### XDMA driver
+To build and install the driver:
+```bash
+git clone https://github.com/openradiosystems/dma_ip_drivers
+cd dma_ip_drivers/XDMA/linux-kernel/xdma
+make POLLING=1
+
+# installs the driver/not required
+sudo make install
+
+# loads the driver
+sudo modprobe ./xdma.ko
+```
+
+If the driver is loaded, with `ls /dev/xdma*` the following devices are appearing:
+
+* /dev/xdma0_h2c_0
+* /dev/xdma0_c2h_0
+* /dev/xdma0_user
+
+
+Optionally: You can add a udev rule in order to make device accessible for user but this is not required and root can still access it.
+The `DEVICE_ID` and `VENDOR_ID` needs to be get with `lspci -nn`:
+```Bash
+lspci -nn
+>...
+> 02:00.0 Serial controller [0700]: Xilinx Corporation Device [DEVICE_ID:VENDOR_ID]
+>...
+
+echo "SUBSYSTEM==\"xdma\", ATTRS{device}==\"0x<DEVICE_ID>\", ATTRS{vendor}==\"0x<VENDOR_ID>\" MODE=\"0666\"" | sudo tee /etc/udev/rules.d/99-aurora.rules > /dev/null 
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+```
+
+### Compiling OAI
+
+```bash
+# Get openairinterface5g source code
+git clone https://github.com/duranta-project/openairinterface5g.git ~/openairinterface5g
+cd ~/openairinterface5g
+git checkout develop
+
+# Install OAI dependencies
+cd ~/openairinterface5g/cmake_targets
+./build_oai -I
+
+# Build OAI gNB
+cd ~/openairinterface5g
+source oaienv
+cd cmake_targets
+./build_oai --ninja --gNB -P --build-lib "ldpc_ors" -C
+```
+
+The shared object file `libldpc_ors.so` is created during the compilation. This object is conditionally compiled. Selection of the library to compile is done using `--build-lib libldpc_ors`. 
+
+
+## Running OAI with XDMA LDPC
+To select the XDMA version for loading into the LDPC interface, the option `--loader.ldpc.shlibversion _ors` needs to be used.
+Alternatively the following configuration needs to be added to your gNB configuration:
+```
+loader : {
+  ldpc : {
+    shlibversion : "_ors";
+  };
+};
+```
+
+For example to run the Uplink test, which was built with the `-P` flag in the build command above.
+
+```
+cd ~/openairinterface5g/cmake_targets/ran_build/build
+./nr_ulsim -n100 -m28 -r273 -R273 -s20 -I5 -C0 -P --loader.ldpc.shlibversion _ors
 ```

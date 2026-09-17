@@ -11,7 +11,6 @@
 #include "SCHED_NR_UE/defs.h"
 #include "PHY/NR_TRANSPORT/nr_transport_common_proto.h"
 #include <math.h>
-#include "PHY/nr_phy_common/inc/nr_phy_common.h"
 #include "PHY/CODING/nrPolar_tools/nr_polar_psbch_defs.h"
 #include "common/utils/bits.h"
 
@@ -32,7 +31,6 @@ typedef struct pdsch_scope_req_s {
 /** \brief This function initialises structures for DLSCH at UE
 */
 void nr_ue_dlsch_init(NR_UE_DLSCH_t *dlsch_list, int num_dlsch, uint8_t max_ldpc_iterations);
-void nr_conjch0_mult_ch1(c16_t *ch0, c16_t *ch1, c16_t *ch0conj_ch1, unsigned short nb_rb, unsigned char output_shift0);
 
 void set_first_last_pdcch_symb(const NR_UE_PDCCH_CONFIG *phy_pdcch_config, int symb_slot, int *first_symb, int *last_symb);
 
@@ -253,13 +251,14 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
                 c16_t dl_ch_mag[][NR_MAX_NB_LAYERS][pdsch_buf_size_max],
                 c16_t dl_ch_magb[][NR_MAX_NB_LAYERS][pdsch_buf_size_max],
                 c16_t dl_ch_magr[][NR_MAX_NB_LAYERS][pdsch_buf_size_max],
-                c16_t ptrs_phase_per_slot[][NR_SYMBOLS_PER_SLOT],
-                int32_t ptrs_re_per_slot[][NR_SYMBOLS_PER_SLOT],
+                c16_t ptrs_phase,
+                uint ptrs_re_per_symbol,
                 uint32_t nvar,
                 pdsch_scope_req_t *scope_req,
-                c16_t rho_dl[][NR_MAX_NB_LAYERS * NR_MAX_NB_LAYERS][pdsch_buf_size_max]);
+                c16_t rho_dl[][NR_MAX_NB_LAYERS * NR_MAX_NB_LAYERS][pdsch_buf_size_max],
+                uint16_t ptrs_symb_pos);
 
-int32_t generate_nr_prach(PHY_VARS_NR_UE *ue, uint8_t gNB_id, int frame, uint8_t slot, c16_t **txData);
+int32_t generate_nr_prach(PHY_VARS_NR_UE *ue, uint8_t gNB_id, int frame, uint8_t slot, int16_t tx_amp, c16_t **txData);
 void apply_ntn_config(PHY_VARS_NR_UE *UE,
                       const NR_DL_FRAME_PARMS *fp,
                       int hfn_rx,

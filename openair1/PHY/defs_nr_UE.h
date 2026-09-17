@@ -90,6 +90,7 @@ typedef struct {
 #define NEIGHBOR_CELL_MAX_CONSECUTIVE_FAILURES 10
 
 typedef struct {
+  int ssb_slot;
   int pss_search_start;
   int pss_search_length;
   uint32_t ssb_rsrp;
@@ -153,7 +154,10 @@ typedef struct {
 
   /// Info about neighboring cells to perform the measurements
   neighboring_cell_info_t neighboring_cell_info[NUMBER_OF_NEIGHBORING_CELLS_MAX];
-  bool meas_request_pending;
+  _Atomic(bool) meas_request_pending;
+  _Atomic(bool) search_new_cells_pending;
+  int last_blind_slot;
+  int last_slot;
 } PHY_NR_MEASUREMENTS;
 
 typedef struct {
@@ -207,7 +211,6 @@ typedef struct {
 #define PBCH_A 24
 
 typedef struct {
-  int16_t amp;
   bool active;
   int num_prach_slots;
   fapi_nr_ul_config_prach_pdu prach_pdu;
@@ -382,6 +385,7 @@ typedef struct PHY_VARS_NR_UE_s {
   double freq_off_acc; /// accumulated DL frequency error (for PI controller)
   double dl_Doppler_shift; /// calculated DL Doppler shift
   double ul_Doppler_shift; /// calculated UL Doppler shift
+  int disable_blind_search; /// flag disabling the blind search for UE searches by neighboring cells
 
   /// Timing Advance updates variables
   /// Timing advance update computed from the TA command signalled from gNB
@@ -391,6 +395,7 @@ typedef struct PHY_VARS_NR_UE_s {
   int ta_frame;
   int ta_slot;
   int ta_command;
+  bool ta_command_is_rar; /// Pending TA command originated from a Random Access Response
 
   /// Flag to initialize averaging of PHY measurements
   int init_averaging;
@@ -452,6 +457,10 @@ typedef struct PHY_VARS_NR_UE_s {
     c16_t   *rho_dl;                // [NR_SYMBOLS_PER_SLOT][NR_MAX_NB_LAYERS*NR_MAX_NB_LAYERS][pdsch_buf_size_max]
     int32_t *pdsch_dl_ch_estimates; // [nb_antennas_rx*NR_MAX_NB_LAYERS][pdsch_est_size]
     int16_t *llr[2];               // [2 codewords][llr_buf_max]
+#ifdef LDPC_CUDA
+    // gpu mapped version (cudaDeviceGetHostPointer), typically the same for Jetson/GH/GB
+    int16_t *llr_dev[10][2];
+#endif
     uint32_t pdsch_buf_size_max;
     uint32_t pdsch_est_size;
     uint32_t llr_buf_max;
@@ -520,7 +529,6 @@ typedef struct {
 typedef struct {
   bool success;
   int nid_cell; // detected PCI
-  int32_t metric; // SSS detection metric
   int freq_offset; // SSS frequency offset estimate
   int phase; // SSS phase
 } sss_detection_result_t;
@@ -546,7 +554,8 @@ typedef struct {
   int subcarrier_spacing;
   int samples_per_slot_wCP;
   int target_nid_cell; // -1 for blind search, specific PCI for targeted search
-  int exclude_nid_cell; // -1 for no exclusion, or serving cell PCI to exclude
+  const uint16_t *exclude_nid_cells; // PCIs to exclude (serving cell + already discovered neighboring cells)
+  int num_exclude_nid_cells; // Number of PCIs in exclude_nid_cells array
   bool apply_freq_offset; // whether to compensate frequency offset
   bool fo_flag; // frequency offset estimation flag for pss_synchro_nr()
   void *rxdataF; // Pre-allocated rxdataF buffer
@@ -608,8 +617,6 @@ typedef struct LDPCDecode_ue_s {
   int offset;
   int Tbslbrm;
   int decodeIterations;
-  time_stats_t ts_deinterleave;
-  time_stats_t ts_rate_unmatch;
   time_stats_t ts_ldpc_decode;
   task_ans_t *ans;
 } ldpcDecode_ue_t;

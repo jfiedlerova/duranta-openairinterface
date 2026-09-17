@@ -113,12 +113,13 @@ int do_RRCSetupRequest(uint8_t *buffer, size_t buffer_size, uint8_t *rv, uint64_
 
 int do_nrMeasurementReport_SA(long trigger_to_measid,
                               long trigger_quantity,
+                              bool report_rsrp,
                               long rs_type,
                               uint16_t Nid_cell,
                               int rsrp_index,
-                              bool neighbor_cell_valid,
-                              uint16_t neighbor_Nid_cell,
-                              int neighbor_rsrp_index,
+                              int num_neighbor_cells,
+                              const uint16_t *neighbor_Nid_cells,
+                              const int *neighbor_rsrp_indexes,
                               uint8_t *buffer,
                               size_t buffer_size);
 
@@ -142,7 +143,10 @@ int do_RRCReestablishment(int8_t nh_ncc, uint8_t *const buffer, size_t buffer_si
 
 int do_RRCReestablishmentComplete(uint8_t *buffer, size_t buffer_size, int64_t rrc_TransactionIdentifier);
 
-NR_MeasConfig_t *get_MeasConfig(const NR_MeasTiming_t *mt,
+#include "openair2/RRC/NR/nr_rrc_defs.h"
+
+NR_MeasConfig_t *get_MeasConfig(gNB_RRC_UE_t *ue,
+                                const NR_MeasTiming_t *mt,
                                 int band,
                                 int nr_pci,
                                 NR_ReportConfigToAddMod_t *rc_PER,

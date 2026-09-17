@@ -96,7 +96,7 @@ int fapi_nr_p7_message_pack(void *pMessageBuf, void *pPackedBuf, uint32_t packed
   // Message type ID [2,3]
   // Message Length [4,5,6,7]
   // Message Body [8,...]
-  if (!(push8(1, &pWritePackedMessage, pPackMessageEnd) && push8(0, &pWritePackedMessage, pPackMessageEnd)
+  if (!(push8(1, &pWritePackedMessage, pPackMessageEnd) && push8(pMessageHeader->phy_id, &pWritePackedMessage, pPackMessageEnd)
         && push16(pMessageHeader->message_id, &pWritePackedMessage, pPackMessageEnd))) {
     NFAPI_TRACE(NFAPI_TRACE_ERROR, "P7 Pack header failed\n");
     return -1;
@@ -129,7 +129,6 @@ bool fapi_nr_p7_message_unpack(void *pMessageBuf,
 {
   int result = 0;
   nfapi_nr_p7_message_header_t *pMessageHeader = (nfapi_nr_p7_message_header_t *)pUnpackedBuf;
-  fapi_message_header_t fapi_hdr;
   AssertFatal(pMessageBuf != NULL && pUnpackedBuf != NULL, "P7 unpack supplied pointers are null");
 
   AssertFatal(messageBufLen >= NFAPI_HEADER_LENGTH && unpackedBufLen >= sizeof(fapi_message_header_t),
@@ -137,14 +136,12 @@ bool fapi_nr_p7_message_unpack(void *pMessageBuf,
               messageBufLen,
               unpackedBufLen);
 
-  if (!fapi_nr_message_header_unpack(pMessageBuf, NFAPI_HEADER_LENGTH, &fapi_hdr, sizeof(fapi_message_header_t), 0)) {
+  if (!fapi_nr_message_header_unpack(pMessageBuf, NFAPI_HEADER_LENGTH, pMessageHeader, sizeof(fapi_message_header_t), 0)) {
     // failed to read the header
     return false;
   }
   uint8_t *pReadPackedMessage = pMessageBuf + NFAPI_HEADER_LENGTH;
   uint8_t *end = (uint8_t *)pMessageBuf + messageBufLen;
-  pMessageHeader->message_length = fapi_hdr.message_length;
-  pMessageHeader->message_id = fapi_hdr.message_id;
   if ((uint8_t *)(pMessageBuf + pMessageHeader->message_length) > end) {
     NFAPI_TRACE(NFAPI_TRACE_ERROR, "P7 unpack message length is greater than the message buffer \n");
     return false;
@@ -1643,7 +1640,9 @@ static uint8_t pack_tx_data_pdu_list_value(void *tlv, uint8_t **ppWritePackedMsg
     return 0;
 
   for (int i = 0; i < value->num_TLV; ++i) {
-    if (!push16(value->TLVs[i].tag, ppWritePackedMsg, end))
+    uint16_t tag = value->TLVs[i].tag == 2 ? 2 : 0;
+    // preserve tag == 2 for nvidia, for direct/ptr, convert to pointer
+    if (!push16(tag, ppWritePackedMsg, end))
       return 0;
 #ifdef ENABLE_AERIAL
     if (!push16(value->TLVs[i].length, ppWritePackedMsg, end))
@@ -1725,22 +1724,18 @@ static uint8_t unpack_tx_data_pdu_list_value(uint8_t **ppReadPackedMsg, uint8_t 
       return 0;
     const uint32_t byte_len = (pNfapiMsg->TLVs[i].length + 3) / 4;
     if (pNfapiMsg->TLVs[i].tag == 1) {
-      pNfapiMsg->TLVs[i].value.ptr = calloc(byte_len, sizeof(uint32_t));
+      pNfapiMsg->TLVs[i].tag = 0;
     }
     switch (pNfapiMsg->TLVs[i].tag) {
-      case 0: {
+      case 0:
+      case 1: {
+        // always pull into direct, which simply avoids one (possibly big)
+        // malloc
         if (!pullarray32(ppReadPackedMsg,
                          pNfapiMsg->TLVs[i].value.direct,
                          sizeof(pNfapiMsg->TLVs[i].value.direct) / sizeof(uint32_t),
                          byte_len,
                          end))
-          return 0;
-
-        break;
-      }
-
-      case 1: {
-        if (!pullarray32(ppReadPackedMsg, pNfapiMsg->TLVs[i].value.ptr, byte_len, byte_len, end))
           return 0;
 
         break;
@@ -2472,6 +2467,12 @@ static uint8_t unpack_nr_srs_report_tlv(nfapi_srs_report_tlv_t *report_tlv, uint
   }
 #ifndef ENABLE_AERIAL
   if (!unpack_nr_srs_report_tlv_value(report_tlv, ppReadPackedMsg, end)) {
+    return 0;
+  }
+#else
+  // Aerial sends a data_buf offset instead of the report; If left unread, the next PDU starts 4 bytes early
+  uint32_t data_buf_offset;
+  if (!pull32(ppReadPackedMsg, &data_buf_offset, end)) {
     return 0;
   }
 #endif

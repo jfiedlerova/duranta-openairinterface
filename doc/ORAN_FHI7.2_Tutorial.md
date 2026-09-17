@@ -306,6 +306,10 @@ timedatectl set-ntp false
 
 ### DPDK (Data Plane Development Kit)
 
+> [!NOTE]
+> DPDK version 20.11 or superior is required  
+> We recommend using DPDK 22.11.11 while possible
+
 Download DPDK version 22.11.11 (K release).
 
 ```bash
@@ -406,7 +410,7 @@ cd ~/openairinterface5g/
 ```bash
 git clone https://github.com/openairinterface/o-du-phy.git ~/phy
 cd ~/phy
-git checkout 11.1.5 # the tag points to the `main` branch which has all patches applied that are relevant for OAI integration; the tag matches the value of cmake variable `K_VERSION`
+git checkout 11.1.7 # the tag points to the `main` branch which has all patches applied that are relevant for OAI integration; the tag matches the value of cmake variable `K_VERSION`
 ```
 or use `xran_DOWNLOAD` option when compiling OAI gNB.
 
@@ -644,6 +648,14 @@ eAXC_id 0 1 # set PRACH eAxC IDs
 
 #### Microamp FR2
 
+Two OAI configuration files are provided for this RU, both with TDD pattern
+`DDDSU` (0.625ms) and 2x2 on band n257:
+- 200MHz: [`gnb.sa.band257.132prb.fhi72.2x2-microamp.conf`](../targets/PROJECTS/GENERIC-NR-5GC/CONF/gnb.sa.band257.132prb.fhi72.2x2-microamp.conf)
+- 100MHz: [`gnb.sa.band257.66prb.fhi72.2x2-microamp.conf`](../ci-scripts/conf_files/gnb.sa.band257.66prb.fhi72.2x2-microamp.conf)
+
+Both use the same carrier frequency (28.04928GHz), so switching between them
+only requires to change the bandwidth of the RU (see below).
+
 #### Firmware starting from 0.1.174
 
 Requirements:
@@ -695,12 +707,9 @@ You can use the following command to display the current RU configuration:
 sshpass -p microampcfg ssh remctl@<RU_IP_ADDR> get-cfg
 ```
 
-<details>
-  <summary>
-  The OAI configuration file [`gnb.sa.band257.132prb.fhi72.2x2-microamp.conf`](../targets/PROJECTS/GENERIC-NR-5GC/CONF/gnb.sa.band257.132prb.fhi72.2x2-microamp.conf) corresponds to the following RU configuration:
-  </summary>
+The OAI configuration file [`gnb.sa.band257.132prb.fhi72.2x2-microamp.conf`](../targets/PROJECTS/GENERIC-NR-5GC/CONF/gnb.sa.band257.132prb.fhi72.2x2-microamp.conf) corresponds to the following RU configuration:
 
-  ```
+```
   PRACH0 CC ID: 0
   PRACH0 RU port ID: 0
   PRACH1 CC ID: 1
@@ -720,9 +729,8 @@ sshpass -p microampcfg ssh remctl@<RU_IP_ADDR> get-cfg
     RU MAC: 10-70-FD-B8-86-02
     DU MAC: 50-7C-6F-31-00-61
   RF Power level: -5 dB - relative to maximum
-  ```
+```
 
-</details>
 
 Execute the following command to check how to configure the RU:
 
@@ -925,12 +933,10 @@ To check PTP status, you can use `rucfg ptp`.
 
 You can use `rucfg show` command to display the current RU configuration. 
 
-<details>
-  <summary>
-  The OAI configuration file [`gnb.sa.band257.132prb.fhi72.2x2-microamp.conf`](../targets/PROJECTS/GENERIC-NR-5GC/CONF/gnb.sa.band257.132prb.fhi72.2x2-microamp.conf) corresponds to the following RU configuration:
-  </summary>
 
-  ```
+The OAI configuration file [`gnb.sa.band257.132prb.fhi72.2x2-microamp.conf`](../targets/PROJECTS/GENERIC-NR-5GC/CONF/gnb.sa.band257.132prb.fhi72.2x2-microamp.conf) corresponds to the following RU configuration:
+
+```
   [INFO] Check if RU is available
   [INFO] RU available
   [INFO] Check SSH to RU available
@@ -956,10 +962,7 @@ You can use `rucfg show` command to display the current RU configuration.
     VLAN MGMT: False
     Beamforming: dynamic-mirrored-beam
   }
-  ```
-
-</details>
-
+```
 
 Execute `rucfg config -h` to check how to configure the RU.
 
@@ -1540,10 +1543,7 @@ Edit the sample OAI gNB configuration file and check following parameters:
 
 * `RUs` section
   * Set an isolated core for RU thread `ru_thread_core`, in our environment we are using CPU 6
-  * If testing with a numerology different than 1 (e.g., FDD with numerology 0),
-    set `nr_scs_for_raster` to the used numerology, and adapt `sl_ahead`: it must be
-    strictly less than the number of slots in a frame (e.g., 5 for numerology 0).
-  
+
 * `fhi_72` (FrontHaul Interface) section: this config follows the structure
   that is employed by the xRAN library (`xran_fh_init` and `xran_fh_config`
   structs in the code):

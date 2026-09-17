@@ -3539,9 +3539,9 @@ bool set_dl_ptrs_values(NR_PTRS_DownlinkConfig_t *ptrs_config,
                          mcsIndex,
                          mcsTable);
   }
-  *portIndex =*ptrs_config->epre_Ratio;
-  *nERatio = *ptrs_config->resourceElementOffset;
-  *reOffset  = 0;
+  *nERatio = *ptrs_config->epre_Ratio;
+  *reOffset = *ptrs_config->resourceElementOffset;
+  *portIndex = 1; // First port
   /* If either or both of the parameters PT-RS time density (LPT-RS) and PT-RS frequency density (KPT-RS), shown in Table
    * 5.1.6.3-1 and Table 5.1.6.3-2, indicates that 'PT-RS not present', the UE shall assume that PT-RS is not present
    */
@@ -3756,6 +3756,10 @@ void get_type0_PDCCH_CSS_config_parameters(NR_Type0_PDCCH_CSS_config_t *type0_PD
                                            uint32_t ssb_period,
                                            uint32_t ssb_offset_point_a)
 {
+  if (!mib) {
+    LOG_E(MAC, "get_type0_PDCCH_CSS_config_parameters() called while mib is not available, mac layer incoherency\n");
+    return;
+  }
   // according to Table 5.3.5-1 in 38.104
   // band 79 is the only one which minimum is 40
   // for all the other channels it is either 10 or 5
@@ -5089,6 +5093,49 @@ uint32_t compute_PDU_length(uint32_t num_TLV, uint32_t total_length)
   // For each TLV, add 2 bytes tag + 2 bytes length + value size without padding
   pdu_length += (num_TLV * 4) + total_length;
   return pdu_length;
+}
+
+ssb_ro_preambles_t get_ssb_ro_preambles_4step(struct NR_RACH_ConfigCommon__ssb_perRACH_OccasionAndCB_PreamblesPerSSB *config)
+{
+  ssb_ro_preambles_t ret = {0};
+  switch (config->present) {
+    case NR_RACH_ConfigCommon__ssb_perRACH_OccasionAndCB_PreamblesPerSSB_PR_oneEighth:
+      ret.ssb_per_ro = 0.125;
+      ret.preambles_per_ssb = (config->choice.oneEighth + 1) << 2;
+      break;
+    case NR_RACH_ConfigCommon__ssb_perRACH_OccasionAndCB_PreamblesPerSSB_PR_oneFourth:
+      ret.ssb_per_ro = 0.25;
+      ret.preambles_per_ssb = (config->choice.oneFourth + 1) << 2;
+      break;
+    case NR_RACH_ConfigCommon__ssb_perRACH_OccasionAndCB_PreamblesPerSSB_PR_oneHalf:
+      ret.ssb_per_ro = 0.5;
+      ret.preambles_per_ssb = (config->choice.oneHalf + 1) << 2;
+      break;
+    case NR_RACH_ConfigCommon__ssb_perRACH_OccasionAndCB_PreamblesPerSSB_PR_one:
+      ret.ssb_per_ro = 1;
+      ret.preambles_per_ssb = (config->choice.one + 1) << 2;
+      break;
+    case NR_RACH_ConfigCommon__ssb_perRACH_OccasionAndCB_PreamblesPerSSB_PR_two:
+      ret.ssb_per_ro = 2;
+      ret.preambles_per_ssb = (config->choice.two + 1) << 2;
+      break;
+    case NR_RACH_ConfigCommon__ssb_perRACH_OccasionAndCB_PreamblesPerSSB_PR_four:
+      ret.ssb_per_ro = 4;
+      ret.preambles_per_ssb = config->choice.four;
+      break;
+    case NR_RACH_ConfigCommon__ssb_perRACH_OccasionAndCB_PreamblesPerSSB_PR_eight:
+      ret.ssb_per_ro = 8;
+      ret.preambles_per_ssb = config->choice.eight;
+      break;
+    case NR_RACH_ConfigCommon__ssb_perRACH_OccasionAndCB_PreamblesPerSSB_PR_sixteen:
+      ret.ssb_per_ro = 16;
+      ret.preambles_per_ssb = config->choice.sixteen;
+      break;
+    default:
+      AssertFatal(false, "Invalid ssb_perRACH_OccasionAndCB_PreamblesPerSSB\n");
+  }
+  LOG_D(NR_MAC, "SSB per RO %f preambles per SSB %d\n", ret.ssb_per_ro, ret.preambles_per_ssb);
+  return ret;
 }
 
 // RA-RNTI computation (associated to PRACH occasion in which the RA Preamble is transmitted)

@@ -10,10 +10,14 @@
 #include "PHY/NR_TRANSPORT/nr_ulsch.h"
 #include "PHY/NR_TRANSPORT/nr_dci.h"
 #include "PHY/NR_ESTIMATION/nr_ul_estimation.h"
+#include "PHY/nr_phy_common/inc/nr_phy_meas.h"
 #include "nfapi/open-nFAPI/nfapi/public_inc/nfapi_interface.h"
 #include "common/utils/LOG/log.h"
 #include "PHY/INIT/nr_phy_init.h"
 #include "PHY/MODULATION/nr_modulation.h"
+#include "PHY/nr_phy_common/inc/nr_phy_common.h"
+#include "PHY/nr_phy_common/inc/nr_phy_common_csi_rs.h"
+#include "PHY/nr_phy_common/inc/nr_phy_common_srs.h"
 #include "T.h"
 #include "T_messages_creator.h"
 #include "executables/nr-softmodem.h"
@@ -277,7 +281,8 @@ void phy_procedures_gNB_TX(PHY_VARS_gNB *gNB,
           // reuse dlsch variables, as there are multiple very large memory
           // buffers
           gNB->dlsch[num_pdsch].pdsch_pdu = &dl_tti_pdu->pdsch_pdu;
-          gNB->dlsch[num_pdsch].pdu = (uint8_t *)TX_req->pdu_list[tx_data_idx].TLVs[0].value.direct;
+          const nfapi_nr_tx_data_request_tlv_t *tlv = &TX_req->pdu_list[tx_data_idx].TLVs[0];
+          gNB->dlsch[num_pdsch].pdu = tlv->tag == 0 ? (uint8_t *)tlv->value.direct : (uint8_t *)tlv->value.ptr;
           DevAssert(num_pdsch < gNB->max_nb_pdsch);
           num_pdsch++;
         } else {
@@ -297,8 +302,9 @@ void phy_procedures_gNB_TX(PHY_VARS_gNB *gNB,
     nr_generate_pdsch(gNB, num_pdsch, gNB->dlsch, frame, slot);
   }
 
-  //apply the OFDM symbol rotation here
-  start_meas(&gNB->phase_comp_stats);
+  // apply the OFDM symbol rotation here
+  int slot_type = nr_slot_select(&gNB->gNB_config, frame, slot);
+  START_MEAS_FULL_SLOT(&gNB->phase_comp_stats, slot_type, NR_DOWNLINK_SLOT);
   for (int aa = 0; aa < fp->nb_antennas_tx; aa++) {
     if (gNB->phase_comp) {
       apply_nr_rotation_TX(fp,
@@ -317,7 +323,7 @@ void phy_procedures_gNB_TX(PHY_VARS_gNB *gNB,
       T_INT(aa),
       T_BUFFER(gNB->common_vars.txdataF[aa], fp->samples_per_slot_wCP * sizeof(int32_t)));
   }
-  stop_meas(&gNB->phase_comp_stats);
+  STOP_MEAS_FULL_SLOT(&gNB->phase_comp_stats, slot_type, NR_DOWNLINK_SLOT);
 }
 
 static int nr_ulsch_procedures(PHY_VARS_gNB *gNB, int frame_rx, int slot_rx, int *ulsch_to_decode, int nb_pusch, NR_UL_IND_t *UL_INFO)
@@ -429,37 +435,42 @@ static void nr_fill_indication(const PHY_VARS_gNB *gNB,
 {
   // Get estimated timing advance for MAC
   const int sync_pos = pusch->delay.est_delay;
+  int timing_advance_update = 0xffff;
 
   // scale the 16 factor in N_TA calculation in 38.213 section 4.2 according to the used FFT size
   uint16_t bw_scaling = 16 * gNB->frame_parms.ofdm_symbol_size / 2048;
 
-  // do some integer rounding to improve TA accuracy
-  int sync_pos_rounded;
-  if (sync_pos > 0)
-    sync_pos_rounded = sync_pos + (bw_scaling / 2) - 1;
-  else
-    sync_pos_rounded = sync_pos - (bw_scaling / 2) + 1;
   if (stats)
     stats->ulsch_stats.sync_pos = sync_pos;
 
-  int timing_advance_update = sync_pos_rounded / bw_scaling;
+  if (pusch->delay.valid) {
+    // do some integer rounding to improve TA accuracy
+    int sync_pos_rounded;
+    if (sync_pos > 0)
+      sync_pos_rounded = sync_pos + (bw_scaling / 2) - 1;
+    else
+      sync_pos_rounded = sync_pos - (bw_scaling / 2) + 1;
 
-  // put timing advance command in 0..63 range
-  timing_advance_update += 31;
-  timing_advance_update = max(timing_advance_update, 0);
-  timing_advance_update = min(timing_advance_update, 63);
+    timing_advance_update = sync_pos_rounded / bw_scaling;
+
+    // put timing advance command in 0..63 range
+    timing_advance_update += 31;
+    timing_advance_update = max(timing_advance_update, 0);
+    timing_advance_update = min(timing_advance_update, 63);
+  }
 
   // estimate UL_CQI for MAC
   int SNRtimes10 = dB_fixed_x10(pusch->ulsch_power_tot) - dB_fixed_x10(pusch->ulsch_noise_power_tot);
 
   LOG_D(PHY,
-        "%d.%d: Estimated SNR for PUSCH is = %f dB (ulsch_power %f, noise %f) delay %d\n",
+        "%d.%d: Estimated SNR for PUSCH is = %f dB (ulsch_power %f, noise %f) delay %d%s\n",
         frame,
         slot_rx,
         SNRtimes10 / 10.0,
         dB_fixed_x10(pusch->ulsch_power_tot) / 10.0,
         dB_fixed_x10(pusch->ulsch_noise_power_tot) / 10.0,
-        sync_pos);
+        sync_pos,
+        pusch->delay.valid ? "" : " (invalid)");
 
   int cqi;
   if      (SNRtimes10 < -640) cqi=0;
@@ -474,7 +485,9 @@ static void nr_fill_indication(const PHY_VARS_gNB *gNB,
   crc->ul_cqi = cqi;
   crc->timing_advance = timing_advance_update;
   // in terms of dBFS range -128 to 0 with 0.1 step
-  crc->rssi = (dtx_flag == 0) ? 1280 - (10 * dB_fixed(32767 * 32767) - dB_fixed_times10(pusch->ulsch_power[0])) : 0;
+  int n_rx = pusch_pdu->param_v4.numSpatialStreamIndices;
+  uint16_t rssi = 1280 - (10 * dB_fixed(32767 * 32767) - dB_fixed_times10(pusch->ulsch_power_tot / n_rx));
+  crc->rssi = (dtx_flag == 0) ? rssi : 0;
 
   pdu->handle = pusch_pdu->handle;
   pdu->rnti = pusch_pdu->rnti;
@@ -775,7 +788,6 @@ nr_srs_info_t nr_srs_rx_procedures(PHY_VARS_gNB *gNB,
     for (int ant_rx_ind = 0; ant_rx_ind < nb_antennas_rx; ant_rx_ind++) {
       uint32_t noise_power_per_ant = 0;
       nr_srs_noise_power_estimation(ofdm_symbol_size,
-                                    frame_parms->first_carrier_offset,
                                     N_symb_SRS,
                                     srs_pdu,
                                     &nr_srs_info,
@@ -1055,7 +1067,7 @@ static bool pusch_signal_detected(PHY_VARS_gNB *gNB, NR_gNB_PUSCH *pusch_vars, N
       stats->ulsch_stats.DTX++;
   }
 
-  return true;
+  return detected;
 }
 
 static bool drop_old_pucch(const void *data, void *user)
@@ -1222,7 +1234,8 @@ int phy_procedures_gNB_uespec_RX(PHY_VARS_gNB *gNB, int frame_rx, int slot_rx, N
     gNB_I0_measurements(gNB, slot_rx, first_symb, num_symb, rb_mask_ul);
   }
 
-  start_meas(&gNB->phy_proc_rx);
+  int slot_type = nr_slot_select(&gNB->gNB_config, frame_rx, slot_rx);
+  START_MEAS_FULL_SLOT(&gNB->phy_proc_rx, slot_type, NR_UPLINK_SLOT);
   UL_INFO->uci_ind.uci_list = UL_INFO->uci_pdu_list;
   UL_INFO->uci_ind.sfn = frame_rx;
   UL_INFO->uci_ind.slot = slot_rx;
@@ -1287,13 +1300,13 @@ int phy_procedures_gNB_uespec_RX(PHY_VARS_gNB *gNB, int frame_rx, int slot_rx, N
     }
   }
 
-  start_meas(&gNB->ulsch_decoding_stats);
   if (num_pusch > 0) {
+    START_MEAS_FULL_SLOT(&gNB->ulsch_decoding_stats, slot_type, NR_UPLINK_SLOT);
     int ret_nr_ulsch_procedures = nr_ulsch_procedures(gNB, frame_rx, slot_rx, ulsch_idx_to_decode, num_pusch, UL_INFO);
     if (ret_nr_ulsch_procedures != 0)
       LOG_E(NR_PHY, "Error in nr_ulsch_procedures, returned %d\n", ret_nr_ulsch_procedures);
+    STOP_MEAS_FULL_SLOT(&gNB->ulsch_decoding_stats, slot_type, NR_UPLINK_SLOT);
   }
-  stop_meas(&gNB->ulsch_decoding_stats);
 
   UL_INFO->srs_ind.sfn = frame_rx;
   UL_INFO->srs_ind.slot = slot_rx;
@@ -1305,7 +1318,7 @@ int phy_procedures_gNB_uespec_RX(PHY_VARS_gNB *gNB, int frame_rx, int slot_rx, N
     stop_meas(&gNB->rx_srs_stats);
   }
 
-  stop_meas(&gNB->phy_proc_rx);
+  STOP_MEAS_FULL_SLOT(&gNB->phy_proc_rx, slot_type, NR_UPLINK_SLOT);
 
   if (n_pucch > 0 || num_pusch > 0) {
     UNUSED(ofdm_symbol_size); // only used if T activated

@@ -6,8 +6,12 @@
  * \brief Top-level routines for demodulating the PDSCH physical channel from 38-211, V15.2 2018-06
  */
 
+#include "PHY/NR_REFSIG/ptrs_nr.h"
 #include "common/platform_constants.h"
 #include "nr_phy_common.h"
+#include "nr_channel_compensation.h"
+#include "nr_compute_llr.h"
+#include "nr_layer_demapping.h"
 #include "PHY/defs_nr_UE.h"
 #include "nr_transport_proto_ue.h"
 #include "PHY/sse_intrin.h"
@@ -17,6 +21,7 @@
 #include "PHY/NR_REFSIG/nr_refsig.h"
 #include "PHY/NR_REFSIG/dmrs_nr.h"
 #include "common/utils/nr/nr_common.h"
+#include "utils.h"
 #include <complex.h>
 #include "openair1/PHY/TOOLS/phy_scope_interface.h"
 #include "nfapi/open-nFAPI/nfapi/public_inc/nfapi_nr_interface.h"
@@ -110,7 +115,7 @@ static uint32_t build_csi_overlap_bitmap(fapi_nr_dl_config_dlsch_pdu_rel15_t *dl
 //==============================================================================================
 
 static void nr_dlsch_channel_level_median(uint32_t rx_size_symbol,
-                                          int32_t dl_ch_estimates_ext[][rx_size_symbol],
+                                          c16_t dl_ch_estimates_ext[][rx_size_symbol],
                                           int32_t median[MAX_ANT][MAX_ANT],
                                           int n_tx,
                                           int n_rx,
@@ -153,7 +158,7 @@ static void nr_dlsch_extract_rbs(uint32_t rxdataF_sz,
                                  uint32_t pdsch_est_size,
                                  int32_t dl_ch_estimates[][pdsch_est_size],
                                  c16_t rxdataF_ext[][rx_size_symbol],
-                                 int32_t dl_ch_estimates_ext[][rx_size_symbol],
+                                 c16_t dl_ch_estimates_ext[][rx_size_symbol],
                                  unsigned char symbol,
                                  uint8_t pilots,
                                  const fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
@@ -161,7 +166,9 @@ static void nr_dlsch_extract_rbs(uint32_t rxdataF_sz,
                                  uint8_t Nl,
                                  NR_DL_FRAME_PARMS *fp,
                                  uint32_t csi_res_bitmap,
-                                 int chest_time_type)
+                                 int chest_time_type,
+                                 uint16_t rnti,
+                                 bool is_ptrs)
 {
   int config_type = dlsch_config->dmrsConfigType;
   int n_dmrs_cdm_groups = dlsch_config->n_dmrs_cdm_groups;
@@ -201,20 +208,23 @@ static void nr_dlsch_extract_rbs(uint32_t rxdataF_sz,
   else
     validDmrsEst = get_next_dmrs_symbol_in_slot(dlsch_config->dlDmrsSymbPos, 0, 14); // get first dmrs symbol index
 
+  const uint k_rb_ref = is_ptrs ? get_ptrs_k_RB(freq_alloc->num_rbs, dlsch_config->PTRSFreqDensity, rnti) : 0;
+  const uint k_ptrs = dlsch_config->PTRSFreqDensity;
+  const uint k_re_ref = dlsch_config->PTRSReOffset;
   int pos = 0;
   int block_start, block_end;
   int offset = 0;
   while (find_next_rb_block(freq_alloc->bitmap, dlsch_config->BWPSize, &pos, &block_start, &block_end)) {
     int start_rb = block_start + dlsch_config->BWPStart;
     int nb_rb = block_end - block_start + 1;
-    const int start_re = (fp->first_carrier_offset + start_rb * NR_NB_SC_PER_RB) % fp->ofdm_symbol_size;
+    const int start_re = CIRCULAR_INC(fp->first_carrier_offset, start_rb * NR_NB_SC_PER_RB, fp->ofdm_symbol_size);
     for (int aarx = 0; aarx < fp->nb_antennas_rx; aarx++) {
       c16_t *rxF_ext = rxdataF_ext[aarx] + offset;
       c16_t *rxF = &rxdataF[aarx][symbol * fp->ofdm_symbol_size];
       for (int l = 0; l < Nl; l++) {
         int32_t *dl_ch0 = &dl_ch_estimates[(l * fp->nb_antennas_rx) + aarx][validDmrsEst * fp->ofdm_symbol_size];
-        int32_t *dl_ch0_ext = dl_ch_estimates_ext[(l * fp->nb_antennas_rx) + aarx] + offset;
-        if (pilots == 0 && csi_res_bitmap == 0) { // data symbol only
+        c16_t *dl_ch0_ext = dl_ch_estimates_ext[(l * fp->nb_antennas_rx) + aarx] + offset;
+        if (!is_ptrs && pilots == 0 && csi_res_bitmap == 0) { // data symbol only
           if (l == 0) {
             if (start_re + nb_rb * NR_NB_SC_PER_RB <= fp->ofdm_symbol_size) {
               memcpy(rxF_ext, &rxF[start_re], nb_rb * NR_NB_SC_PER_RB * sizeof(int32_t));
@@ -230,18 +240,18 @@ static void nr_dlsch_extract_rbs(uint32_t rxdataF_sz,
           int j = 0;
           int k = start_re;
           for (int rb = start_rb; rb < start_rb + nb_rb; rb++) {
-            uint32_t overlap_map = rb % 2 ?  dmrs_csi_overlap_odd : dmrs_csi_overlap_even;
+            const uint start_rb_alloc = freq_alloc->first_rb + dlsch_config->BWPStart;
+            uint16_t ptrs_re_map = is_ptrs ? get_ptrs_re_bitmap(rb - start_rb_alloc, k_re_ref, k_ptrs, k_rb_ref) : 0;
+            uint32_t overlap_map = (ptrs_re_map & 0xfff) | (rb % 2 ? dmrs_csi_overlap_odd : dmrs_csi_overlap_even);
             for (int re = 0; re < NR_NB_SC_PER_RB; re++) {
               if (((overlap_map >> re) & 0x01) == 0) {
                 // DATA RE
                 if (l == 0)
                   rxF_ext[j] = rxF[k];
-                dl_ch0_ext[j] = dl_ch0[re];
+                dl_ch0_ext[j] = *(c16_t *)(dl_ch0 + re);
                 j++;
               }
-              k++;
-              if (k >= fp->ofdm_symbol_size)
-                k -= fp->ofdm_symbol_size;
+              k = CIRCULAR_INC(k, 1, fp->ofdm_symbol_size);
             }
             dl_ch0 += 12;
           }
@@ -252,17 +262,14 @@ static void nr_dlsch_extract_rbs(uint32_t rxdataF_sz,
   }
 }
 
-/* Zero Forcing Rx function: nr_a_sum_b()
- * Compute the complex addition x=x+y
- *
- * */
+/*
+ * nr_a_sum_b(): Compute the complex addition x=x+y
+ */
 void nr_a_sum_b(c16_t *input_x, c16_t *input_y, unsigned short nb_rb)
 {
-  unsigned short rb;
   simde__m128i *x = (simde__m128i *)input_x;
   simde__m128i *y = (simde__m128i *)input_y;
-
-  for (rb=0; rb<nb_rb; rb++) {
+  for (int rb = 0; rb < nb_rb; rb++) {
     x[0] = simde_mm_adds_epi16(x[0], y[0]);
     x[1] = simde_mm_adds_epi16(x[1], y[1]);
     x[2] = simde_mm_adds_epi16(x[2], y[2]);
@@ -304,7 +311,7 @@ static void nr_determin(int size,
                         int32_t sign,
                         int32_t shift0)
 {
-  AssertFatal(size > 0, "");
+  AssertFatal(size > 0, "impossible null size in nr_determin");
 
   if(size==1) {
     nr_element_sign(a44[0][0], // a
@@ -509,17 +516,6 @@ uint8_t nr_matrix_inverse(int32_t size,
   return(0);
 }
 
-/* Zero Forcing Rx function: nr_conjch0_mult_ch1()
- *
- *
- * */
-// TODO: This function is just a wrapper, can be removed.
-void nr_conjch0_mult_ch1(c16_t *ch0, c16_t *ch1, c16_t *ch0conj_ch1, unsigned short nb_rb, unsigned char output_shift0)
-{
-  //This function is used to compute multiplications in H_hermitian * H matrix
-  mult_cpx_conj_vector(ch0, ch1, ch0conj_ch1, 12 * nb_rb, output_shift0);
-}
-
 /*
  * MMSE Rx function: up to 4 layers
  */
@@ -531,7 +527,7 @@ static void nr_dlsch_mmse(uint32_t pdsch_buf_size_max,
                           c16_t dl_ch_mag[][pdsch_buf_size_max],
                           c16_t dl_ch_magb[][pdsch_buf_size_max],
                           c16_t dl_ch_magr[][pdsch_buf_size_max],
-                          int32_t dl_ch_estimates_ext[][rx_size_symbol],
+                          c16_t dl_ch_estimates_ext[][rx_size_symbol],
                           unsigned char mod_order,
                           int shift,
                           int length,
@@ -553,12 +549,12 @@ static void nr_dlsch_mmse(uint32_t pdsch_buf_size_max,
   for (int rtx = 0; rtx < nl; rtx++) {//row
     for (int ctx = 0; ctx < nl; ctx++) {//column
       for (int aarx = 0; aarx < n_rx; aarx++)  {
-        c16_t *ch0r = (c16_t *)dl_ch_estimates_ext[rtx * n_rx + aarx];
-        c16_t *ch0c = (c16_t *)dl_ch_estimates_ext[ctx * n_rx + aarx];
-        nr_conjch0_mult_ch1(ch0r,
+        c16_t *ch0r = dl_ch_estimates_ext[rtx * n_rx + aarx];
+        c16_t *ch0c = dl_ch_estimates_ext[ctx * n_rx + aarx];
+        mult_cpx_conj_vector(ch0r,
                             ch0c,
                             conjH_H_elements[aarx][ctx][rtx], // sic
-                            nb_rb_0,
+                            nb_rb_0 * NR_NB_SC_PER_RB,
                             shift);
         if (aarx != 0)
           nr_a_sum_b(conjH_H_elements[0][ctx][rtx], conjH_H_elements[aarx][ctx][rtx], nb_rb_0);
@@ -761,17 +757,18 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
                 c16_t dl_ch_mag[][NR_MAX_NB_LAYERS][pdsch_buf_size_max],
                 c16_t dl_ch_magb[][NR_MAX_NB_LAYERS][pdsch_buf_size_max],
                 c16_t dl_ch_magr[][NR_MAX_NB_LAYERS][pdsch_buf_size_max],
-                c16_t ptrs_phase_per_slot[][NR_SYMBOLS_PER_SLOT],
-                int32_t ptrs_re_per_slot[][NR_SYMBOLS_PER_SLOT],
+                c16_t ptrs_phase,
+                uint ptrs_re_per_symbol,
                 uint32_t nvar,
                 pdsch_scope_req_t *scope_req,
-                c16_t rho_dl[][NR_MAX_NB_LAYERS * NR_MAX_NB_LAYERS][pdsch_buf_size_max])
+                c16_t rho_dl[][NR_MAX_NB_LAYERS * NR_MAX_NB_LAYERS][pdsch_buf_size_max],
+                uint16_t is_ptrs)
 {
   NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
   const int nl = dlsch->cw_info.Nl;
   const int matrixSz = nbRx * nl;
-  const uint32_t rx_size_symbol = (freq_alloc->num_rbs * NR_NB_SC_PER_RB + 15) & ~15;
-  __attribute__((aligned(32))) int32_t dl_ch_estimates_ext[matrixSz][rx_size_symbol];
+  const uint32_t rx_size_symbol = ceil_mod(freq_alloc->num_rbs * NR_NB_SC_PER_RB, 16);
+  __attribute__((aligned(64))) c16_t dl_ch_estimates_ext[matrixSz][rx_size_symbol];
 
   // Use ML-based LLR for 2-layer MIMO with QPSK/16QAM/64QAM (nl==2, qamModOrder<=6).
   // Controlled by ue->do_ml (set via -E flag in dlsim, or ue->do_ml in the UE struct).
@@ -819,7 +816,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
   int nb_rb_pdsch = freq_alloc->num_rbs;
 
   start_meas_nr_ue_phy(ue, DLSCH_EXTRACT_RBS_STATS);
-  __attribute__((aligned(32))) c16_t rxdataF_ext[nbRx][rx_size_symbol];
+  __attribute__((aligned(64))) c16_t rxdataF_ext[nbRx][rx_size_symbol];
   memset(rxdataF_ext, 0, sizeof(rxdataF_ext));
 
   uint32_t csi_res_bitmap = build_csi_overlap_bitmap(dlsch_config, symbol);
@@ -839,7 +836,9 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
                        nl,
                        fp,
                        csi_res_bitmap,
-                       ue->chest_time);
+                       ue->chest_time,
+                       dlsch->rnti,
+                       is_ptrs);
   stop_meas_nr_ue_phy(ue, DLSCH_EXTRACT_RBS_STATS);
   if (scope_req->copy_chanest_to_scope) {
     size_t size = sizeof(c16_t) * nb_rb_pdsch * NR_NB_SC_PER_RB;
@@ -863,6 +862,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
                 ((config_type == NFAPI_NR_DMRS_TYPE1) ? nb_rb_pdsch * (12 - 6 * dlsch_config->n_dmrs_cdm_groups) :
                 nb_rb_pdsch * (12 - 4 * dlsch_config->n_dmrs_cdm_groups)):
                 (nb_rb_pdsch * 12);
+  nb_re_pdsch -= ptrs_re_per_symbol;
   // Subtract CSI-RS REs from PDSCH RE count
   if (csi_res_bitmap != 0) {
     uint32_t csi_re_count = 0;
@@ -894,40 +894,26 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
     UEscopeCopyUnsafe(ue, pdschRxdataF, rxdataF_ext[0], size, scope_req->scope_rxdataF_offset, copy_index);
     scope_req->scope_rxdataF_offset += size;
   }
-  //----------------------------------------------------------
-  //--------------------- Channel Scaling --------------------
-  //----------------------------------------------------------
-  start_meas_nr_ue_phy(ue, DLSCH_CHANNEL_SCALE_STATS);
-  nr_scale_channel(rx_size_symbol, dl_ch_estimates_ext, 0, nb_re_pdsch, nl, nbRx, 0);
-  stop_meas_nr_ue_phy(ue, DLSCH_CHANNEL_SCALE_STATS);
-  if (meas_enabled) {
-    LOG_D(PHY,
-          "[AbsSFN %u.%d] Slot%d Symbol %d: Channel Scale  %5.2f \n",
-          frame,
-          nr_slot_rx,
-          slot,
-          symbol,
-          ue->phy_cpu_stats.cpu_time_stats[DLSCH_CHANNEL_SCALE_STATS].p_time / (cpuf * 1000.0));
-  }
 
   //----------------------------------------------------------
   //--------------------- Channel Level Calc. ----------------
   //----------------------------------------------------------
   start_meas_nr_ue_phy(ue, DLSCH_CHANNEL_LEVEL_STATS);
   if (first_symbol_flag) {
-    int32_t avg[nl * nbRx];
+    int32_t avg[nl][nbRx];
     if (nb_re_pdsch)
-      nr_channel_level(0, rx_size_symbol, (c16_t (*)[rx_size_symbol])dl_ch_estimates_ext, nbRx, nl, avg, nb_re_pdsch);
+      for (int i = 0; i < nl; i++)
+        nr_channel_level(0, rx_size_symbol, chFext[i], nbRx, avg[i], nb_re_pdsch);
     else
       LOG_E(NR_PHY, "Average channel level is 0: nb_rb_pdsch = %d, nb_re_pdsch = %d\n", nb_rb_pdsch, nb_re_pdsch);
     int avgs = 0;
     int32_t median[MAX_ANT][MAX_ANT];
     for (int l = 0; l < nl; l++)
       for (int aarx = 0; aarx < nbRx; aarx++) {
-        avgs = cmax(avgs, avg[l * nbRx + aarx]);
-        LOG_D(PHY, "nb_rb %d avg_%d_%d Power per SC is %d\n", nb_rb_pdsch, aarx, l, avg[l * nbRx + aarx]);
+        avgs = cmax(avgs, avg[l][aarx]);
+        LOG_D(PHY, "nb_rb %d avg_%d_%d Power per SC is %d\n", nb_rb_pdsch, aarx, l, avg[l][aarx]);
         LOG_D(PHY, "avgs Power per SC is %d\n", avgs);
-        median[l][aarx] = avg[l * nbRx + aarx];
+        median[l][aarx] = avg[l][aarx];
       }
 
     if (nl > 1) {
@@ -950,10 +936,10 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
       T_INT(gNB_id),
       T_INT(frame % 1024),
       T_INT(nr_slot_rx),
-      T_INT(avg[0]), // layer 0, antenna 0
-      T_INT(nbRx > 1 ? avg[1] : 0), // layer 0, antenna 1
-      T_INT(nl > 1 ? avg[nbRx] : 0), // layer 1, antenna 0
-      T_INT(nl > 1 && nbRx > 1 ? avg[nbRx + 1] : 0)); // layer 1, antenna 1
+      T_INT(avg[0][0]), // layer 0, antenna 0
+      T_INT(nbRx > 1 ? avg[0][1] : 0), // layer 0, antenna 1
+      T_INT(nl > 1 ? avg[1][0] : 0), // layer 1, antenna 0
+      T_INT(nl > 1 && nbRx > 1 ? avg[1][1] : 0)); // layer 1, antenna 1
 #endif
   }
   stop_meas_nr_ue_phy(ue, DLSCH_CHANNEL_LEVEL_STATS);
@@ -983,6 +969,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
                           dl_ch_magr[symbol],
                           p_rxComp,
                           need_rho ? (c16_t(*)[nl][pdsch_buf_size_max])rho_dl[symbol] : NULL,
+                          ptrs_phase,
                           dlsch->cw_info.qamModOrder,
                           0, // symbol already baked into p_rxComp
                           *log2_maxh);
@@ -1065,36 +1052,10 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
   dl_valid_re[symbol] = nb_re_pdsch;
   int startSymbIdx = 0;
   int nbSymb = 0;
-  int pduBitmap = 0;
 
   if(dlsch_harq->status == NR_ACTIVE) {
     startSymbIdx = dlsch_config->start_symbol;
     nbSymb = dlsch_config->number_symbols;
-    pduBitmap = dlsch_config->pduBitmap;
-  }
-
-  /* PTRS processing for multiple antenna ports is broken because the following
-  function estimates phase offset from and applies compensation to rxdataF_comp
-  for each antenna port but rxdataF_comp has MRCed data. */
-  /* TODO: Move PTRS phase estimation before immediately after DMRS channels
-  estimation and apply PTRS phase compensation in nr_channel_compensationi() */
-  /* Check for PTRS bitmap and process it respectively */
-  if((pduBitmap & 0x1) && (dlsch->rnti_type == TYPE_C_RNTI_)) {
-    nr_pdsch_ptrs_processing(1, // rxdataF_comp is MRCed so no point in processing all antenna ports. Fixme.
-                             ptrs_phase_per_slot,
-                             ptrs_re_per_slot,
-                             pdsch_buf_size_max,
-                             nl,
-                             rxdataF_comp,
-                             fp,
-                             dlsch_config,
-                             nr_slot_rx,
-                             symbol,
-                             freq_alloc->num_rbs,
-                             dlsch->rnti,
-                             &dlsch->ptrs_symbols,
-                             &dlsch->ptrs_symbol_index);
-    dl_valid_re[symbol] -= ptrs_re_per_slot[0][symbol];
   }
 
   /* at last symbol in a slot calculate LLR's for whole slot */
@@ -1103,7 +1064,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
     int max_symb_re = 0;
     GET_ARRAY_MAX(dl_valid_re, NR_SYMBOLS_PER_SLOT, max_symb_re);
     const int llr_per_symbol = max_symb_re * dlsch->cw_info.qamModOrder;
-    __attribute__((aligned(32))) int16_t layer_llr[NR_SYMBOLS_PER_SLOT][nl][llr_per_symbol];
+    __attribute__((aligned(64))) int16_t layer_llr[NR_SYMBOLS_PER_SLOT][nl][llr_per_symbol];
 
     // Generate LLR from PTRS compensated signal
     const uint8_t qamModOrder = dlsch->cw_info.qamModOrder;

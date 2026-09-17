@@ -68,10 +68,12 @@ typedef struct {
   uint8_t first_rx;
   /// DLSCH status flag indicating
   NR_SCH_status_t status;
-  /// Pointer to the payload (38.212 V15.4.0 section 5.1)
-  uint8_t *b;
   /// Pointer to transport block segments
   uint8_t *c;
+#ifdef LDPC_CUDA
+  /// Pointer to transport block segments (GPU pointer for c when using shared memory, should be the same on Jetson
+  uint8_t *cdev;
+#endif
   /// soft bits for each received segment ("d"-sequence)(for definition see 36-212 V8.6 2009-03, p.15)
   /// Accumulates the soft bits for each round to increase decoding success (HARQ)
   int16_t *d;
@@ -109,10 +111,6 @@ typedef struct {
   uint8_t max_ldpc_iterations;
   /// number of iterations used in last turbo decoding
   int8_t last_iteration_cnt;
-  /// bit mask of PT-RS ofdm symbol indicies
-  uint16_t ptrs_symbols;
-  // PTRS symbol index, to be updated every PTRS symbol within a slot.
-  uint8_t ptrs_symbol_index;
 } NR_UE_DLSCH_t;
 
 typedef struct {
