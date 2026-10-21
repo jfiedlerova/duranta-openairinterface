@@ -19,6 +19,8 @@ ENV TZ=Europe/Paris
 
 RUN dnf update -y && \
     dnf install -y \
+        protobuf \
+        grpc-cpp \
         procps-ng \
         libXpm \
         libX11 \
