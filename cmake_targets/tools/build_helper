@@ -195,7 +195,11 @@ check_install_usrp_uhd_driver(){
         v=$(lsb_release -cs)
         $SUDO apt-add-repository --remove "deb http://files.ettus.com/binaries/uhd/repo/uhd/ubuntu/$v $v main"
         if [[ -v BUILD_UHD_FROM_SOURCE ]] || [[ "$OS_DISTRO" == "debian" ]]; then
-            $SUDO apt-get install -y $boost_libs_ubuntu libusb-1.0-0-dev doxygen python3-docutils python3-mako python3-numpy python3-requests python3-setuptools ninja-build libgrpc++-dev libprotobuf-dev protobuf-compiler-grpc
+            if [[ "$UHD_VERSION" == "4.11.0.0" ]]; then
+              $SUDO apt-get install -y autoconf automake build-essential ccache cmake cpufrequtils doxygen ethtool g++ git inetutils-tools libboost-all-dev libncurses-dev libusb-1.0-0 libusb-1.0-0-dev libusb-dev python3-dev python3-mako python3-numpy python3-requests python3-scipy python3-setuptools python3-ruamel.yaml libgrpc++-dev libprotobuf-dev protobuf-compiler-grpc
+            else
+              $SUDO apt-get install -y $boost_libs_ubuntu libusb-1.0-0-dev doxygen python3-docutils python3-mako python3-numpy python3-requests python3-setuptools ninja-build
+            fi
             install_usrp_uhd_driver_from_source
             return
         fi
@@ -223,6 +227,9 @@ check_install_usrp_uhd_driver(){
             then
                 # until EPEL repo hasn't bumped UHD driver to >=3.10 in EPEL, build driver from source
                 $SUDO $INSTALLER -y remove uhd uhd-devel uhd-firmware
+            fi
+            if [[ "$UHD_VERSION" == "4.11.0.0" ]]; then
+              $SUDO $INSTALLER -y install grpc-devel grpc-plugins protobuf-devel protobuf-compiler
             fi
             install_usrp_uhd_driver_from_source
         else
