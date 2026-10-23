@@ -19,11 +19,8 @@ ENV TZ=Europe/Paris
 # Install EPEL for RHEL9
 RUN dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
 
-# protobuf (also needed by EPEL's grpc-cpp) is only in CRB
 RUN dnf update -y && \
-    dnf install -y --enablerepo=codeready-builder-for-rhel-9-x86_64-rpms \
-        protobuf \
-        grpc-cpp \
+    dnf install -y \
         lksctp-tools \
         procps-ng \
         tzdata \
@@ -80,6 +77,19 @@ COPY --from=nr-ue-base \
     /lib64/libicudata.so.67 \
     /lib64/libicui18n.so.67 \
     /lib64/libicuuc.so.67 \
+    /lib64/
+
+# grpc/protobuf runtime of libuhd >= 4.11; protobuf is in CRB, which needs the
+# entitlement only nr-ue-base has. Globbed as abseil/grpc sonames follow EPEL updates.
+COPY --from=nr-ue-base \
+    /lib64/libproto*.so.* \
+    /lib64/libgrpc*.so.* \
+    /lib64/libgpr.so.* \
+    /lib64/libupb.so.* \
+    /lib64/libaddress_sorting.so.* \
+    /lib64/libabsl_*.so.* \
+    /lib64/libre2.so.* \
+    /lib64/libcares.so.* \
     /lib64/
 
 # Now we are copying from builder-image the UHD files.

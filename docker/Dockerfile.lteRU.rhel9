@@ -19,11 +19,8 @@ ENV TZ=Europe/Paris
 # Install EPEL for RHEL9
 RUN dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
 
-# protobuf (also needed by EPEL's grpc-cpp) is only in CRB
 RUN dnf update -y && \
-    dnf install -y --enablerepo=codeready-builder-for-rhel-9-x86_64-rpms \
-        protobuf \
-        grpc-cpp \
+    dnf install -y \
         tzdata \
         procps-ng \
         libusbx \
@@ -64,6 +61,19 @@ COPY --from=ru-base \
     /lib64/libboost_atomic.so.1.75.0 \
     /lib64/libboost_timer.so.1.75.0 \
     /lib64/libboost_regex.so.1.75.0 \
+    /lib64/
+
+# grpc/protobuf runtime of libuhd >= 4.11; protobuf is in CRB, which needs the
+# entitlement only ru-base has. Globbed as abseil/grpc sonames follow EPEL updates.
+COPY --from=ru-base \
+    /lib64/libproto*.so.* \
+    /lib64/libgrpc*.so.* \
+    /lib64/libgpr.so.* \
+    /lib64/libupb.so.* \
+    /lib64/libaddress_sorting.so.* \
+    /lib64/libabsl_*.so.* \
+    /lib64/libre2.so.* \
+    /lib64/libcares.so.* \
     /lib64/
 
 # Copying from the ran-build image the USRP needed packages
