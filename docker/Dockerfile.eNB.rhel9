@@ -16,8 +16,12 @@ FROM ran-build:latest AS enb-build
 FROM registry.redhat.io/ubi9/ubi:latest AS oai-enb
 ENV TZ=Europe/Paris
 
+# Install EPEL for RHEL9
+RUN dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
+
+# protobuf (also needed by EPEL's grpc-cpp) is only in CRB
 RUN dnf update -y && \
-    dnf install -y \
+    dnf install -y --enablerepo=codeready-builder-for-rhel-9-x86_64-rpms \
         protobuf \
         grpc-cpp \
         lksctp-tools \

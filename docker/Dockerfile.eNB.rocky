@@ -17,7 +17,9 @@ FROM ran-build:latest AS enb-build
 FROM $BASE_IMAGE AS oai-enb
 ENV TZ=Europe/Paris
 
-RUN dnf update -y && \
+RUN dnf install 'dnf-command(config-manager)' -y && \
+    dnf install epel-release -y && crb enable && \
+    dnf update -y && \
     dnf install -y \
         protobuf \
         grpc-cpp \
