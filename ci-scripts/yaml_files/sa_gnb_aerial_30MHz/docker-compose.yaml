@@ -22,12 +22,14 @@ services:
       - /var/run/dbus/system_bus_socket:/var/run/dbus/system_bus_socket
       - /run/systemd/system:/run/systemd/system
       - ./cuphycontroller_P5G_WNC_DGX.yaml:/opt/nvidia/cuBB/cuPHY-CP/cuphycontroller/config/cuphycontroller_P5G_WNC_DGX.yaml
+      - ./l2_adapter_config_P5G_DGX.yaml:/opt/nvidia/cuBB/cuPHY-CP/cuphycontroller/config/l2_adapter_config_P5G_DGX.yaml
       - /var/log/aerial:/var/log/aerial
     userns_mode: host
     ipc: "shareable"
     image: nv-cubb:26-1-dgx
     environment:
       - cuBB_SDK=/opt/nvidia/cuBB
+      - CUDA_MODULE_LOADING=EAGER
     command: bash -c "/opt/nvidia/cuBB/run-l1.sh"
     healthcheck:
       test: ["CMD-SHELL",'grep -q "L1 is ready!" /tmp/phy.log && echo 0 || echo 1']
@@ -35,7 +37,7 @@ services:
       timeout: 5s
       retries: 5
   oai-gnb-aerial:
-    cpuset: "17-19"
+    cpuset: "16-19"
     image: ${REGISTRY-oaisoftwarealliance/}${GNB_IMG:-oai-gnb-aerial}:${TAG:-develop}
     depends_on:
       nv-cubb:

@@ -133,12 +133,12 @@ cuphydriver_config:
   enable_srs: 1
   ue_mode: 0
   mCh_segment_proc_enable: 0
-  pusch_aggr_per_ctx: 3
-  prach_aggr_per_ctx: 2
-  pucch_aggr_per_ctx: 4
-  srs_aggr_per_ctx: 3
-  ul_input_buffer_per_cell: 10
-  ul_input_buffer_per_cell_srs: 6
+  pusch_aggr_per_ctx: 16
+  prach_aggr_per_ctx: 4
+  pucch_aggr_per_ctx: 12
+  srs_aggr_per_ctx: 12
+  ul_input_buffer_per_cell: 20
+  ul_input_buffer_per_cell_srs: 12
   max_harq_pools: 384
   max_harq_tx_count_bundled: 10
   max_harq_tx_count_non_bundled: 4
