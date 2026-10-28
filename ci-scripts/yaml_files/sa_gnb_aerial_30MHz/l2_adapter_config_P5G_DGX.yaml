@@ -39,14 +39,6 @@ message_thread_config:
   cpu_affinity: 11
   # thread priority
   sched_priority: 95
-# Low-priority worker for offloaded non-slot CONFIG/START/STOP. cpu_affinity below is a
-# per-platform placeholder overridden by autoconfig (auto_override_yaml_cores.py via
-# l1_logical_cores_DU_*), the same convention timer_thread/message_thread follow;
-# priority kept below msg_processing (95) and timer (99) so it never preempts them.
-nonslot_lp_thread_config:
-  name: nonslot_lp
-  cpu_affinity: 4
-  sched_priority: 94
 # Lowest TTI for Ticking
 mu_highest: 1
 dl_tb_loc: 1
@@ -124,16 +116,17 @@ transport:
     primary: 1
     prefix: nvipc
     cuda_device_id: 0
+    ring_len: 8192
     mempool_size:
       cpu_msg:
         buf_size: 15000
-        pool_len: 200
+        pool_len: 4096
       cpu_data:
         buf_size: 576000
-        pool_len: 50
+        pool_len: 1024
       cpu_large:
         buf_size: 4096000
-        pool_len: 16
+        pool_len: 64
       cuda_data:
         buf_size: 307200
         pool_len: 0
