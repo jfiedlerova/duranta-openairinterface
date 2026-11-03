@@ -126,6 +126,7 @@ add_physim_test(physim.5g.nr_dlsim.mcs.mimo.test11 "2x2 MIMO, 2 Layers 1024 QAM"
 add_physim_test(physim.5g.nr_dlsim.mcs.mimo.test12 "1024 QAM HARQ retx on 40 of 51 PRBs (reserved MCS 31), 2 rounds, at least 45% TP" nr_dlsim -P -n100 -q3 -e26 -s34 -S34.5 -R106 -b51 -K40 -t45)
 add_physim_test(physim.5g.nr_dlsim.mcs.mimo.test13 "273 PRBs 1024 QAM MCS Index 26" nr_dlsim -P -n50 -q3 -e26 -s40 -S41 -R273 -b273)
 add_physim_test(physim.5g.nr_dlsim.mcs.mimo.test14 "4x4 MIMO, 4 Layers 1024 QAM, 273 PRBs" nr_dlsim -P -n20 -q3 -e26 -s48 -S49 -R273 -b273 -x4 -y4 -z4)
+add_physim_test(physim.5g.nr_dlsim.mcs.mimo.test15 "4x4 MIMO, 3 Layers" nr_dlsim -P -n30 -s20 -U 3 0 0 2 -x3 -y4 -z4)
 add_physim_test(physim.5g.nr_dlsim.dmrs.ptrs.test1 "3 PTRS, 8 Interpolated Symbols" nr_dlsim -P -n300 -s5 -T 2 2 2)
 add_physim_test(physim.5g.nr_dlsim.dmrs.ptrs.test2 "6 PTRS, 5 Interpolated Symbols" nr_dlsim -P -n300 -s5 -T 2 1 2)
 add_physim_test(physim.5g.nr_dlsim.dmrs.ptrs.test3 "11 PTRS, 0 Interpolated Symbols" nr_dlsim -P -n300 -s5 -T 2 0 4)
