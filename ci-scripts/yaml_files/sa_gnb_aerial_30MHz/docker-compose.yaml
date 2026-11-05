@@ -26,11 +26,11 @@ services:
       - /var/log/aerial:/var/log/aerial
     userns_mode: host
     ipc: "shareable"
-    image: nv-cubb:26-1-dgx
+    image: nv-cubb:26-2-dgx
     environment:
       - cuBB_SDK=/opt/nvidia/cuBB
       - CUDA_MODULE_LOADING=EAGER
-    command: bash -c "/opt/nvidia/cuBB/run-l1.sh"
+    command: bash -c "/opt/nvidia/cuBB/run_l1.sh"
     healthcheck:
       test: ["CMD-SHELL",'grep -q "L1 is ready!" /tmp/phy.log && echo 0 || echo 1']
       interval: 20s
