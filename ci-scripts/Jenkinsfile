@@ -8,9 +8,12 @@ def testXMLFile = params.pythonTestXmlFile
 def mainPythonAllXmlFiles = ""
 def buildStageStatus = true
 
-// Name of the resource
+// parallelOnExecutor: all test steps run on the executor (node "localhost") in the Jenkins workspace,
+// so several builds can share one host; lock one free slot among the resources labelled pythonExecutor
 def lockResources = []
-if (params.LockResources != null && params.LockResources.trim().length() > 0)
+if (params.parallelOnExecutor)
+  lockResources = [[label: pythonExecutor, quantity: 1]]
+else if (params.LockResources != null && params.LockResources.trim().length() > 0)
   params.LockResources.trim().split(",").each{lockResources += [resource: it.trim()]}
 
 // Global Parameters. Normally they should be populated when the upstream job
@@ -24,6 +27,7 @@ def sourceBranch = params.sourceBranch ?: testBranch
 
 def flexricOption = ""
 def runWithOC = false
+def ciWorkspace = ""
 
 //-------------------------------------------------------------------------------
 // Pipeline start
@@ -34,7 +38,7 @@ pipeline {
   options {
     timestamps()
     ansiColor('xterm')
-    lock(extra: lockResources)
+    lock(extra: lockResources, variable: 'LOCKED_RESOURCES')
     skipDefaultCheckout()
   }
 
@@ -57,12 +61,22 @@ pipeline {
           echo '\u2705 \u001B[94mVerify Parameters\u001B[0m'
           def allParametersPresent = true
 
-          if (params.LockResources == null) {
+          if (params.LockResources == null && !params.parallelOnExecutor) {
             echo "no LockResources given"
             allParametersPresent = false
           }
-          if (params.workspace == null) {
-            echo "no workspace given, using ${env.WORKSPACE}"
+          echo "Locked resources    :   ${env.LOCKED_RESOURCES}"
+          // parallelOnExecutor: reuse the checkout Jenkins made in "Build Init"; concurrent builds of
+          // this job get distinct workspaces (<job>@2, ...)
+          if (params.parallelOnExecutor) {
+            ciWorkspace = env.WORKSPACE
+            echo "using workspace created by Jenkins: ${ciWorkspace}"
+          } else if (params.workspace?.trim()) {
+            ciWorkspace = params.workspace.trim()
+            echo "using workspace given as parameter: ${ciWorkspace}"
+          } else {
+            echo "no workspace given and parallelOnExecutor not set"
+            allParametersPresent = false
           }
           if (params.OC_Credentials != null) {
             echo "This pipeline is configured to run with Openshift Cluster."
@@ -113,7 +127,7 @@ pipeline {
                       python3 main.py --repository=${testRepository} \
                                       --branch=${testBranch} \
                                       ${mergeWithTarget} --targetBranch=${targetBranch} \
-                                      --workspace=${params.workspace ?: env.WORKSPACE} \
+                                      --workspace=${ciWorkspace} \
                                       --OCUserName=${OC_Username} --OCPassword=${OC_Password} --OCProjectName=${OC_ProjectName} \
                                       ${flexricOption} \
                                       ${mainPythonAllXmlFiles}
@@ -131,7 +145,7 @@ pipeline {
                     python3 main.py --repository=${testRepository} \
                                     --branch=${testBranch} \
                                     ${mergeWithTarget} --targetBranch=${targetBranch} \
-                                    --workspace=${params.workspace ?: env.WORKSPACE} \
+                                    --workspace=${ciWorkspace} \
                                     ${flexricOption} \
                                     ${mainPythonAllXmlFiles}
                   """
