@@ -585,3 +585,15 @@ rfsim5g_multiue10:
   IF: oaitun_ue10
   AttachScript: "true"
   DetachScript: "true"
+
+sl_ota_sync_ref:
+  Host: matix
+  NetworkScript: docker exec oai-sl-sync-ref ip -4 a show dev oaitun_ue1
+  CmdPrefix: docker exec oai-sl-sync-ref
+  IF: oaitun_ue1
+
+sl_ota_ue1:
+  Host: avra
+  NetworkScript: docker exec oai-sl-ue1 ip -4 a show dev oaitun_ue1
+  CmdPrefix: docker exec oai-sl-ue1
+  IF: oaitun_ue1
